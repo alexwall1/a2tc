@@ -52,7 +52,11 @@ INSERT_NODE = re.compile(
     # `what` is free-form: it may name several provisions at once,
     # "the following Articles 1a, 1b and 1c are inserted".
     r"(?:after\s+(?P<anchor>[^,]+?),\s*)?the\s+following\s+"
-    r"(?P<what>.+?)\s+(?:is|are|shall\s+be)\s+inserted",
+    r"(?P<what>.+?)\s+(?:is|are|shall\s+be)\s+inserted"
+    # The position is stated either before the sentence or after it: "after Article
+    # 3gaa, the following ... is inserted" and "the following paragraphs are inserted
+    # after paragraph 3" are the same instruction.
+    r"(?:\s+(?P<where>after|in\s+the\s+beginning\s+of)\s+(?P<tail>.+?))?\s*:?\s*$",
     re.I,
 )
 APPEND_NODE = re.compile(
@@ -81,6 +85,25 @@ def _strip_scope(text: str) -> tuple[str | None, str]:
     if match:
         return match.group("scope").strip(), text[match.end():].strip()
     return None, text
+
+
+# Where the instruction says its new provision goes, in the words it uses. "to" and
+# "at the end of" name the provision the new text joins, which is where it already
+# goes; only a stated position has to be resolved and honoured.
+_ANCHOR_WHERE = {
+    "after": "after",
+    "in the beginning of": "before",
+}
+
+
+def _record_anchor(instruction: Instruction, where: str | None, anchor: str) -> None:
+    """Keep a stated insertion position, and say so in the notes either way."""
+    where = re.sub(r"\s+", " ", (where or "after")).strip().lower()
+    anchor = anchor.strip().rstrip(":;,. ")
+    instruction.note(f"insert {where} {anchor}")
+    if where in _ANCHOR_WHERE and anchor:
+        instruction.anchor_where = _ANCHOR_WHERE[where]
+        instruction.anchor_text = anchor
 
 
 def classify(instruction: Instruction) -> Instruction:
@@ -123,7 +146,10 @@ def classify(instruction: Instruction) -> Instruction:
             instruction.target_text = (match.group("what") or "").strip() or None
             if match.group("anchor"):
                 instruction.scope_text = scope or None
-                instruction.notes.append(f"insert after {match.group('anchor').strip()}")
+                _record_anchor(instruction, "after", match.group("anchor"))
+            elif match.group("tail"):
+                _record_anchor(instruction, match.group("where"),
+                               match.group("tail"))
             return instruction
 
         match = APPEND_NODE.search(body)
@@ -131,8 +157,8 @@ def classify(instruction: Instruction) -> Instruction:
             instruction.op = Op.APPEND_NODE
             instruction.target_text = (match.group("what") or "").strip() or None
             if match.group("anchor"):
-                where = re.sub(r"\s+", " ", (match.group("where") or "after")).lower()
-                instruction.note(f"append {where} {match.group('anchor').strip()}")
+                _record_anchor(instruction, match.group("where"),
+                               match.group("anchor"))
             return instruction
 
     match = REPLACE_NODE.match(body)

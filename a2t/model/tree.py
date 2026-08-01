@@ -13,6 +13,7 @@ why every node also records its 1-based ``index`` among siblings of the same kin
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -136,3 +137,24 @@ def _normalise_key(key: str | None) -> str | None:
     if key is None:
         return None
     return key.strip().strip("().").lower()
+
+
+_ARTICLE_KEY = re.compile(r"^(?P<number>\d+)(?P<suffix>[a-z]*)$")
+
+
+def article_order(key: str | None) -> tuple[int, str] | None:
+    """Where an article number falls in the order the Official Journal prints them.
+
+    An act amended over time is never renumbered: a new article takes the number it
+    follows plus a letter, and one inserted between those takes another letter again.
+    So Article 3 is followed by 3a … 3g, then by 3ga … 3gg, and only then by 3h.
+
+    Comparing the number and then the suffix as a plain string reproduces that
+    exactly — "g" < "ga" < "gg" < "h" — and is checked against the article sequence
+    of the consolidated ETS Directive, which exercises every one of those steps.
+
+    None for a key this does not describe, which callers must treat as "unknown
+    position" rather than as first or last.
+    """
+    match = _ARTICLE_KEY.match(_normalise_key(key) or "")
+    return (int(match.group("number")), match.group("suffix")) if match else None

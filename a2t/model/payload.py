@@ -43,6 +43,9 @@ OPEN_QUOTES = "‘“\""
 CLOSE_QUOTES = "’”\""
 
 ARTICLE_HEADING = re.compile(r"^Article\s+(?P<key>\d+[a-z]*)$", re.I)
+
+ROMAN = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+         "xi", "xii", "xiii", "xiv", "xv"]
 NUMBERED = re.compile(r"^(?P<key>\d{1,2}[a-z]?)\.\s+(?P<rest>\S.*)$", re.S)
 LETTERED = re.compile(r"^\((?P<key>[a-z]{1,4})\)\s+(?P<rest>\S.*)$", re.S)
 
@@ -89,14 +92,40 @@ def printed(block: Node | Provision) -> str:
     return block.text
 
 
+def opening_number(node: Node) -> str:
+    """The paragraph number printed at the head of this provision, if any.
+
+    EUR-Lex keeps a paragraph's number outside its words — the number is a span of
+    its own and the text lives in child subparagraphs — so a numbered paragraph is a
+    node with a key and nothing else, and the number has to be printed by whatever
+    carries its first words. Without this the act loses its paragraph numbering
+    entirely: all 262 of them in the ETS Directive.
+    """
+    if node.kind is Kind.PARAGRAPH and node.key and not node.text:
+        return f"{node.key}. "
+    parent = node.parent
+    if (parent is not None and parent.kind is Kind.PARAGRAPH and parent.key
+            and not parent.text and parent.children
+            and parent.children[0] is node):
+        return f"{parent.key}. "
+    return ""
+
+
 def from_node(node: Node) -> list[Provision]:
     """The blocks a provision already in the act is printed as.
 
     In document order, and carrying the same text in the same pieces as
-    `Node.full_text` joins — so the blocks of a replacement's old side always add up
-    to the `old_text` the change set records.
+    `Node.full_text` joins, plus the paragraph number the act keeps outside them.
+    That number is part of the old text so that a replacement restating it — which
+    is how payloads are drafted — diffs against it instead of striking it and
+    inserting the same digit back.
     """
-    return [Provision(n.kind, n.key, n.text) for n in node.walk() if n.text]
+    blocks = [Provision(n.kind, n.key, n.text) for n in node.walk() if n.text]
+    number = opening_number(node)
+    # Never in front of a marker of its own, which would read "(a) 1. …".
+    if number and blocks and blocks[0].key is None:
+        blocks[0].text = number + blocks[0].text
+    return blocks
 
 
 # ------------------------------------------------------------------------ layout
@@ -154,10 +183,80 @@ def _take_title(lines: list[str], body_indent: int) -> tuple[str | None, list[st
     return " ".join(taken), lines[len(taken):]
 
 
+@dataclass
+class _Level:
+    """An open list of points: where it sits, and the last marker seen in it.
+
+    `wrapped` is where the current point's continuation lines were found to sit, once
+    one has been seen. Payloads differ: some indent a point's wrapped lines past its
+    marker, some set them flush with it, and which of the two this payload does is
+    what decides whether an unmarked line back at the marker's own indent is more of
+    the point or the text that follows the list.
+    """
+
+    indent: int
+    key: str
+    wrapped: int | None = None
+
+
+def _place(levels: list[_Level], key: str) -> int | None:
+    """The depth `key` belongs at, or None if it opens nothing and continues nothing.
+
+    Indentation is the clearer signal but it is not always there: a payload of points
+    is routinely set as one wrapped block at a single margin — points (aj) to (ao)
+    added to Article 3 of the ETS Directive, or point (e) with its two sub-points.
+    Sequence is what remains, and it is the same test `a2t.parse.segment` applies to
+    the instructions themselves: a marker either succeeds the last one at some open
+    level, or opens the next level down with that sequence's first marker.
+    """
+    for depth in range(len(levels) - 1, -1, -1):
+        if _succeeds(levels[depth].key, key):
+            return depth
+    if not levels:
+        # The first marker of a payload sets the sequence, whatever it starts at:
+        # points added to an article continue its existing lettering.
+        return 0
+    return len(levels) if key in ("a", "i", "1") else None
+
+
+def _succeeds(previous: str, key: str) -> bool:
+    """Is `key` the next marker after `previous` in the same sequence?"""
+    if previous.isdigit() and key.isdigit():
+        return int(key) == int(previous) + 1
+    if previous in ROMAN and key in ROMAN:
+        # "i" after "h" is a letter, not a numeral; the alpha reading is tried first.
+        if _alpha_successor(previous) == key:
+            return True
+        return ROMAN.index(key) == ROMAN.index(previous) + 1
+    if previous.isalpha() and key.isalpha():
+        return _alpha_successor(previous) == key
+    return False
+
+
+def _leaves_points(levels: list[_Level], indent: int) -> bool:
+    """Has an unmarked line at `indent` stepped back out of the open points?
+
+    Two ways of telling, and a payload supplies whichever it can. Where the point's
+    own wrapped lines are indented past its marker, anything set back at the marker
+    has left it — this is Article 3c(6), whose points wrap at column 11 and whose
+    closing subparagraph ("Fuels shall be eligible …") returns to column 5. Where the
+    payload wraps flush instead, that test says nothing, and only a line outdented
+    past where the list itself begins can be read as leaving it.
+
+    A payload that wraps flush *and* never outdents keeps its closing text inside the
+    last point. Nothing in the layout distinguishes the two there, and inventing a
+    boundary would move words from one provision to another.
+    """
+    innermost = levels[-1]
+    if innermost.wrapped is not None:
+        return indent < innermost.wrapped
+    return indent + SLACK < levels[0].indent
+
+
 def _body(lines: list[str], body_indent: int) -> list[Provision]:
     """Numbered paragraphs, their subparagraphs and their points, in reading order."""
     out: list[Provision] = []
-    levels: list[int] = []  # indents of the open point levels, outermost first
+    levels: list[_Level] = []  # the open point levels, outermost first
 
     for line in lines:
         indent, text = _indent(line), line.strip()
@@ -171,21 +270,22 @@ def _body(lines: list[str], body_indent: int) -> list[Provision]:
             continue
 
         marker = lettered or numbered
-        if marker is not None and not at_body:
-            while levels and levels[-1] > indent:
-                levels.pop()
-            if not levels or levels[-1] < indent:
-                levels.append(indent)
-            kind = Kind.POINT if len(levels) == 1 else Kind.SUBPOINT
+        depth = _place(levels, marker.group("key")) if marker else None
+        if depth is not None:
+            del levels[depth:]
+            levels.append(_Level(indent, marker.group("key")))
+            kind = Kind.POINT if depth == 0 else Kind.SUBPOINT
             out.append(Provision(kind, marker.group("key"), marker.group("rest")))
             continue
 
-        if at_body and levels:
-            # Back at the article's own indent after a run of points: the paragraph
-            # continues with a subparagraph, which carries no marker of its own.
+        # A line set back outside the points that precede it has left them: the
+        # paragraph continues with a subparagraph, which carries no marker of its own.
+        if levels and _leaves_points(levels, indent):
             levels = []
             out.append(Provision(Kind.SUBPARAGRAPH, None, text))
             continue
+        if levels and levels[-1].wrapped is None and indent > levels[-1].indent:
+            levels[-1].wrapped = indent
 
         if not out:
             out.append(Provision(Kind.SUBPARAGRAPH, None, text))
@@ -203,12 +303,17 @@ def _from_layout(lines: Sequence[str]) -> list[Provision]:
         if key is not None and not group:
             provisions.append(Provision(Kind.ARTICLE, key))
             continue
-        body_indent = min(_indent(line) for line in group)
         title, rest = (None, group)
         if key is not None:
-            title, rest = _take_title(group, body_indent)
+            # A centred title stands clear of everything under it, so the shallowest
+            # line in the article is the one to measure it against.
+            title, rest = _take_title(group, min(_indent(l) for l in group))
             provisions.append(Provision(Kind.ARTICLE, key, title=title))
-        provisions.extend(_body(rest, body_indent))
+        # The body's own left margin is where it starts. Taking the shallowest line
+        # instead would let one stray outdented block — proposals contain them —
+        # re-level the whole payload, and a numbered paragraph indented past it would
+        # read as a point of something.
+        provisions.extend(_body(rest, _indent(rest[0]) if rest else 0))
     return provisions
 
 

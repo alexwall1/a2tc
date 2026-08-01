@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from a2t.apply.changeset import Change, ChangeKind, ChangeSet
-from a2t.apply.diff import Pair, diff
+from a2t.apply.diff import Pair, Span, diff
 from a2t.emit.tracked_docx import TrackedDocx
 from a2t.model.payload import Provision, printed, structure
 from a2t.model.tree import Act, Kind, Node
@@ -74,6 +74,7 @@ class DocumentEmitter:
         self.by_node = changeset.by_node()
         self.result = EmitResult(path=Path())
         self._seen: set[int] = set()
+        self._number = ""  # a paragraph number waiting for the block that carries it
 
     # ---------------------------------------------------------------------- api
 
@@ -125,6 +126,15 @@ class DocumentEmitter:
     def _render(self, node: Node) -> None:
         changes = self.by_node.get(id(node), [])
         whole = next((c for c in changes if c.kind in WHOLE_NODE), None)
+
+        if node.kind is Kind.PARAGRAPH and node.key and not node.text:
+            # EUR-Lex keeps a paragraph's number outside its words: the number is a
+            # span of its own and the text lives in child subparagraphs, so a
+            # numbered paragraph is a node with a key and nothing else. Printed as
+            # it stands, the act loses its paragraph numbering entirely — every one
+            # of the 262 in the ETS Directive. The number waits here for the first
+            # block of text that can carry it.
+            self._number = f"{node.key}. "
 
         deleted = whole is not None and whole.kind is ChangeKind.DELETE
         if node.kind is Kind.CHAPTER:
@@ -202,15 +212,22 @@ class DocumentEmitter:
             # "after" bracket the whole change; rendering them separately would show
             # the provision twice.
             combined = diff(edits[0].old_text, edits[-1].new_text)
-            block = self.doc.from_spans(combined.spans, style=self._style(node))
+            block = self.doc.from_spans(self._numbered(combined.spans),
+                                        style=self._style(node))
             for change in edits:
                 self._account(change, block, count_paragraph=change is edits[0])
             return
         if node.text:
-            self.doc.unchanged(self._prefixed(node), style=self._style(node))
+            self.doc.unchanged(self._take_number() + self._prefixed(node),
+                               style=self._style(node))
             self.result.paragraphs += 1
 
     def _whole_node(self, node: Node, change: Change) -> None:
+        # The change set already put the paragraph number into the text on both
+        # sides of this edit, so that a payload restating it diffs against it rather
+        # than replacing it with itself. Adding it again here would print it twice.
+        self._take_number()
+
         if not change.blocks:
             mark = "del" if change.kind is ChangeKind.DELETE else None
             block = self.doc.from_spans(change.edit.spans, style=self._style(node),
@@ -218,9 +235,7 @@ class DocumentEmitter:
             self._account(change, block)
             return
 
-        written = [
-            block for pair in change.blocks for block in self._aligned(pair)
-        ]
+        written = [block for pair in change.blocks for block in self._aligned(pair)]
         # `_account` counts the last one.
         self.result.paragraphs += len(written) - 1
         self._account(change, written[0])
@@ -308,6 +323,20 @@ class DocumentEmitter:
             self.result.paragraphs += 1
 
     # ---------------------------------------------------------------- helpers
+
+    def _take_number(self) -> str:
+        """The paragraph number waiting to be printed, if any, taken."""
+        number, self._number = self._number, ""
+        return number
+
+    def _numbered(self, spans) -> list:
+        """`spans`, with any waiting paragraph number in front of them.
+
+        Used where the change touches a phrase inside the provision, which never
+        touches the number: it stands unrevised in front of whatever the edit does.
+        """
+        number = self._take_number()
+        return [Span("equal", number), *spans] if number else list(spans)
 
     def _style(self, node: Node | Provision) -> str:
         if node.kind is Kind.SUBPOINT:

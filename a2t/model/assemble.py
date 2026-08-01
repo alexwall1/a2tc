@@ -135,25 +135,40 @@ def _within_point(el, stop) -> bool:
     return False
 
 
-def _add_subparagraphs(target: Node, el) -> None:
-    """Add `p.norm` blocks inside `el` as subparagraphs of `target`.
+def _add_body(target: Node, el) -> None:
+    """Add the subparagraphs and points inside `el` to `target`, in document order.
 
-    A point's text is itself marked up as `p.norm`, so sweeping every descendant
-    would add each point twice — once here without its marker and once as a point.
-    `_add_points` owns everything inside a `grid-container`.
+    Both in one pass, because their order carries meaning: Article 10(3) opens with a
+    subparagraph, lists fourteen points, and closes with four more subparagraphs that
+    refer back to them ("For the purposes of point (a) …"). Collected in two passes
+    the points end up after every subparagraph, and the act refers forward to points
+    the reader has not reached.
+
+    A point's text is itself marked up as `p.norm`, so a `p.norm` inside a
+    `grid-container` belongs to the point holding it and is not a subparagraph of its
+    own — otherwise every point would be added twice, once without its marker.
+    `lxml`'s `iter()` is pre-order, which is document order.
     """
     added = False
     for child in el.iter():
-        if not isinstance(child.tag, str) or child.tag != "p":
-            continue
-        if not _has_class(child, "norm") or _has_class(child, "modref"):
+        if not isinstance(child.tag, str) or _has_class(child, "modref"):
             continue
         if _within_point(child, el):
-            continue
-        text = clean_text(child)
-        if text:
-            target.add(Node(Kind.SUBPARAGRAPH, text=text))
+            continue  # inside a point, which owns everything under it
+
+        if _has_class(child, "grid-container"):
+            key, text = _point_parts(child)
+            point = target.add(Node(Kind.POINT, key=key, text=text))
+            col2 = child.find_class("grid-list-column-2")
+            if col2:
+                _add_points(point, col2[0], Kind.SUBPOINT)
             added = True
+        elif child.tag == "p" and _has_class(child, "norm"):
+            text = clean_text(child)
+            if text:
+                target.add(Node(Kind.SUBPARAGRAPH, text=text))
+                added = True
+
     if not added:
         text = clean_text(el)
         if text:
@@ -229,8 +244,7 @@ def _populate_article(article: Node, blocks) -> Node:
             )
             body = child.find_class("norm inline-element")
             source = body[0] if body else child
-            _add_subparagraphs(paragraph, source)
-            _add_points(paragraph, source)
+            _add_body(paragraph, source)
             current = paragraph
             continue
 

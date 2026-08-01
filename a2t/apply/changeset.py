@@ -17,7 +17,7 @@ from enum import Enum
 
 from a2t.apply.diff import Edit, Pair, align, diff
 from a2t.model.instruction import Instruction, Op
-from a2t.model.payload import Provision, from_node, structure
+from a2t.model.payload import Provision, from_node, opening_number, structure
 from a2t.model.tree import Act, Kind, Node
 from a2t.resolve.resolver import Resolution, ResolutionReport
 
@@ -278,12 +278,14 @@ def build_changes(resolution: Resolution,
             return [
                 Change(
                     ChangeKind.REPLACE, instruction, node=node,
-                    old_text=node.full_text, new_text=segment,
-                    edit=diff(node.full_text, segment),
+                    old_text=opening_number(node) + node.full_text,
+                    new_text=segment,
+                    edit=diff(opening_number(node) + node.full_text, segment),
                     # The layout covers the whole payload, not this one segment of
                     # it, so the segment's own markers have to do the work.
                     blocks=_blocks(instruction, node, segment,
-                                   diff(node.full_text, segment)),
+                                   diff(opening_number(node) + node.full_text,
+                                        segment)),
                     note=f"payload split across {len(targets)} provisions",
                 )
                 for node, segment in zip(targets, segments)
@@ -308,7 +310,7 @@ def build_changes(resolution: Resolution,
                     note="one sentence replaced within the provision",
                 ))
                 continue
-            old = node.full_text
+            old = opening_number(node) + node.full_text
             new = instruction.payload or ""
             edit = diff(old, new)
             changes.append(Change(
@@ -319,7 +321,7 @@ def build_changes(resolution: Resolution,
             ))
 
         elif instruction.op is Op.DELETE_NODE:
-            old = node.full_text
+            old = opening_number(node) + node.full_text
             edit = diff(old, "")
             changes.append(Change(
                 ChangeKind.DELETE, instruction, node=node,

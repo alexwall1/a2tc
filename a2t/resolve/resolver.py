@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 
 from a2t.model.instruction import Instruction, Op, TargetBlock
 from a2t.model.path import Path, Step, parse_ordinal, resolve
-from a2t.model.tree import Act, Kind, Node
+from a2t.model.payload import structure
+from a2t.model.tree import Act, Kind, Node, article_order
 from a2t.textdiff import similarity
 
 KIND_NOUNS = {
@@ -206,6 +207,25 @@ def _parse_fragment(fragment: str) -> Step | None:
     return None
 
 
+# "the following Article 3gaa is inserted" — the number, where the instruction gives
+# one. Most do not, and then the payload's own heading is the only place it appears.
+ARTICLE_TARGET = re.compile(r"^Articles?\s+(?P<key>\d+[a-z]*)\b", re.I)
+
+
+def _inserted_articles(instruction: Instruction) -> list[str]:
+    """The numbers of the articles an instruction inserts, in the order given."""
+    keys = [
+        provision.key
+        for provision in structure(instruction.payload or "",
+                                   instruction.payload_layout)
+        if provision.is_article and provision.key
+    ]
+    if keys:
+        return keys
+    match = ARTICLE_TARGET.match((instruction.target_text or "").strip())
+    return [match.group("key")] if match else []
+
+
 def _is_redundant(context: Path, steps: list[Step]) -> bool:
     """True when a scope restates the context it already sits in.
 
@@ -307,15 +327,7 @@ class Resolver:
             return
 
         if instruction.op in (Op.INSERT_NODE, Op.APPEND_NODE):
-            # The new node does not exist yet; resolve the container receiving it.
-            # An empty path means the act itself — a new article at top level.
-            if not scoped.steps:
-                report.results.append(
-                    Resolution(instruction, path=scoped, node=self.act.root,
-                               status="resolved")
-                )
-                return
-            report.results.append(self._check(instruction, scoped))
+            report.results.append(self._resolve_insertion(instruction, scoped))
             return
 
         if instruction.target_text and OWN_TITLE.match(instruction.target_text.strip()):
@@ -414,6 +426,86 @@ class Resolver:
                     f"{len(absent)} of {len(found)} targets"
                 )
         return result
+
+    # ---------------------------------------------------------------- placement
+
+    def _resolve_insertion(self, instruction: Instruction, scoped: Path) -> Resolution:
+        """Which provision a new one is placed after.
+
+        The instruction may say so outright — "after Article 3gaa, the following
+        Article 3gab is inserted" — and then that is what happens. Where it does not,
+        the number the new provision is given says it instead: an act is never
+        renumbered, so Article 25b belongs after Article 25a and a new Article 30
+        after Article 29.
+
+        Failing both, the new text joins the end of the container receiving it, which
+        is all the instruction has said about where it goes.
+        """
+        # Tried in order, and only as far as needed: each records why it could not
+        # place the provision, and a position already found needs no explaining.
+        stated = self._stated_position(instruction, scoped)
+        if stated is not None:
+            return stated
+        numbered = self._numbered_position(instruction, scoped)
+        if numbered is not None:
+            return numbered
+
+        # The new node does not exist yet; resolve the container receiving it.
+        # An empty path means the act itself — a new article at top level.
+        if not scoped.steps:
+            return Resolution(instruction, path=scoped, node=self.act.root,
+                              status="resolved")
+        return self._check(instruction, scoped)
+
+    def _stated_position(self, instruction: Instruction,
+                         scoped: Path) -> Resolution | None:
+        """The position the instruction states, when it states one it can be given."""
+        if not instruction.anchor_text or instruction.anchor_where != "after":
+            return None
+        steps = parse_phrase(instruction.anchor_text)
+        if not steps:
+            instruction.note(
+                f"stated position {instruction.anchor_text!r} could not be read"
+            )
+            return None
+        node = resolve(self._extend(scoped, steps), self.act)
+        if node is None:
+            # Routinely because the proposal is inserting that provision too, a few
+            # instructions earlier. Falling through to the number gets the same
+            # answer, since a provision sorts after the one it is placed behind.
+            instruction.note(
+                f"stated position {instruction.anchor_text!r} is not in "
+                f"{self.act.celex} — it may be one this proposal also inserts"
+            )
+            return None
+        return Resolution(instruction, path=scoped, node=node, status="resolved")
+
+    def _numbered_position(self, instruction: Instruction,
+                           scoped: Path) -> Resolution | None:
+        """The article a new one follows, read off the number it is given."""
+        if scoped.steps:
+            return None  # an insertion within a provision, not a new article
+        keys = _inserted_articles(instruction)
+        position = article_order(keys[0]) if keys else None
+        if position is None:
+            return None
+
+        earlier = [
+            (order, article) for article in self.act.articles
+            if (order := article_order(article.key)) is not None and order < position
+        ]
+        if not earlier:
+            instruction.note(
+                f"Article {keys[0]} comes before every article in "
+                f"{self.act.celex} — placed at the end of the act instead"
+            )
+            return None
+        node = max(earlier, key=lambda pair: pair[0])[1]
+        instruction.note(
+            f"the instruction does not say where this goes; placed after "
+            f"Article {node.key}, where its number belongs"
+        )
+        return Resolution(instruction, path=scoped, node=node, status="resolved")
 
     def _extend(self, context: Path, steps: list[Step]) -> Path:
         if not steps:

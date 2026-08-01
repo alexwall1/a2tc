@@ -39,6 +39,11 @@ class Instruction:
     payload_layout: list[str] = field(default_factory=list)
     find_text: str | None = None  # for REPLACE_TEXT / DELETE_TEXT
     replace_text: str | None = None
+    # "after Article 3gaa, the following Article 3gab is inserted" — where the
+    # instruction says its new provision goes. Without one the position has to be
+    # worked out from the number the provision is given.
+    anchor_text: str | None = None
+    anchor_where: str | None = None  # "after" | "before"
     footnotes: list[str] = field(default_factory=list)
 
     children: list[Instruction] = field(default_factory=list)

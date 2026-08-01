@@ -188,12 +188,42 @@ def test_chapter_title_edit_resolves(resolutions):
     assert result.node.title == "STATIONARY INSTALLATIONS"
 
 
-def test_new_article_inserts_at_act_root(resolutions):
-    """'the following Article 3gaa is inserted' has no existing target node."""
+def test_new_article_is_placed_by_its_number(resolutions):
+    """'the following Article 3gaa is inserted' names no position, so the number it
+    is given supplies one: an act is never renumbered, and 3gaa follows 3ga."""
     result = resolutions["1.5"]
     assert result.ok
     assert result.instruction.op is Op.INSERT_NODE
-    assert result.node.kind is Kind.ACT
+    assert result.node.kind is Kind.ARTICLE
+    assert result.node.key == "3ga"
+
+
+def test_position_naming_a_provision_the_proposal_itself_inserts(resolutions):
+    """'after Article 3gaa, the following Article 3gab is inserted' — but 3gaa is
+    not in the base act, the instruction before this one inserts it. The number
+    reaches the same place: both land after 3ga, in the order given."""
+    result = resolutions["1.6"]
+    assert result.ok
+    assert result.node.key == "3ga"
+    assert any("also inserts" in note for note in result.instruction.notes)
+
+
+def test_a_stated_position_is_not_second_guessed(resolutions):
+    """Where the instruction says where its new article goes, the number is never
+    consulted — and the reader is not told it was."""
+    result = resolutions["1.22.a.ii"]
+    assert result.ok
+    assert not any("its number belongs" in note
+                   for note in result.instruction.notes)
+
+
+def test_a_new_paragraph_goes_after_the_one_it_names(resolutions):
+    """'the following paragraphs are inserted after paragraph 3' used to land at the
+    end of the article, past every paragraph that follows paragraph 3."""
+    result = resolutions["1.22.a.ii"]
+    assert result.ok
+    assert result.node.kind is Kind.PARAGRAPH
+    assert result.node.key == "3"
 
 
 def test_text_replacement_verifies_the_phrase_exists(resolutions):

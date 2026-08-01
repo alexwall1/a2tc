@@ -13,7 +13,7 @@ from a2t.model.path import Path as NodePath
 from a2t.model.path import Step, parse_ordinal, resolve
 from a2t.model.reconcile import reconcile
 from a2t.model.subdivide import split_sentences
-from a2t.model.tree import Act, Kind, Node
+from a2t.model.tree import Act, Kind, Node, article_order
 
 CACHE = Path(__file__).resolve().parents[1] / "out" / "cache" / "02003L0087-20240301"
 
@@ -82,6 +82,26 @@ def test_points_are_not_also_counted_as_subparagraphs(act):
     assert len(points) == 14
     assert len(subs) == 5
     assert not any(sub.text == point.text for sub in subs for point in points)
+
+
+def test_points_and_subparagraphs_keep_their_document_order(act):
+    """Their order carries meaning: Article 10(3) opens with a subparagraph, lists
+    fourteen points, and closes with four more that refer back to them ("For the
+    purposes of point (a) …"). Collected in two passes the points came last, and the
+    act referred forward to points the reader had not reached."""
+    kinds = [child.kind for child in act.article("10").by_key(Kind.PARAGRAPH, "3").children]
+    assert kinds[0] is Kind.SUBPARAGRAPH
+    assert kinds[1:15] == [Kind.POINT] * 14
+    assert kinds[15:] == [Kind.SUBPARAGRAPH] * 4
+
+
+def test_article_numbering_order_matches_the_act(act):
+    """The evidence for the ordering rule: sorting the consolidated ETS Directive's
+    article numbers has to reproduce the sequence the Official Journal prints, which
+    runs 3g, 3ga … 3gg, 3h and 10c, 10ca, 10d."""
+    keys = [article.key for article in act.articles]
+    assert all(article_order(key) is not None for key in keys)
+    assert sorted(keys, key=article_order) == keys
 
 
 def test_article_10a_paragraph_sequence(act):
@@ -250,3 +270,19 @@ def test_empty_act_is_safe():
     empty = Act(celex="x", title="y")
     assert empty.articles == []
     assert empty.article("1") is None
+
+
+def test_article_order_follows_the_letters_not_the_alphabet():
+    """An act is never renumbered, so an article inserted after 3g becomes 3ga, and
+    one inserted after *that* becomes 3gaa — all of which still precede 3h."""
+    keys = ["3", "3a", "3g", "3ga", "3gaa", "3gab", "3gb", "3h", "4", "10", "10a"]
+    assert sorted(keys, key=article_order) == keys
+    assert article_order("25b") > article_order("25a")
+    assert article_order("30") > article_order("29a")
+
+
+def test_article_order_declines_to_guess():
+    """A key it cannot read is an unknown position, never a first or last one."""
+    assert article_order(None) is None
+    assert article_order("I") is None
+    assert article_order("3(2)") is None

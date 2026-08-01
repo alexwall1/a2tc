@@ -383,6 +383,47 @@ def test_every_block_of_an_inserted_article_is_a_revision(tmp_path):
         assert paragraph._p.findall(f"{W}pPr/{W}rPr/{W}ins")
 
 
+def test_appended_points_are_indented_as_points(tmp_path):
+    """Points added to an article print at the points' indent, not as body text."""
+    act = make_act()
+    article = act.article("1")
+    instr = instruction(op=Op.APPEND_NODE, raw="the following points are added:",
+                        payload_layout=[
+                            "       ‘(aj) ‘hazardous waste’ means hazardous waste;",
+                            "       (ak) ‘municipal waste’ means municipal waste;’;",
+                        ])
+    inserted = change(ChangeKind.INSERT, None, anchor=article, instr=instr,
+                      new="(aj) ‘hazardous waste’ means hazardous waste; "
+                          "(ak) ‘municipal waste’ means municipal waste;")
+    result = emit_document(act, ChangeSet(act=act, changes=[inserted]),
+                           tmp_path / "a.docx")
+    paragraphs = _styled(result.path)
+
+    assert ("OJ Point", "(aj) ‘hazardous waste’ means hazardous waste;") in paragraphs
+    assert ("OJ Point", "(ak) ‘municipal waste’ means municipal waste;") in paragraphs
+
+
+def test_replaced_point_carries_its_sub_points_at_their_own_indent(tmp_path):
+    act = make_act()
+    article = act.article("1")
+    point = article.add(Node(Kind.POINT, key="e", text="‘installation’ means a unit."))
+    instr = instruction(op=Op.REPLACE_NODE,
+                        payload="(e) ‘installation’ means either of the following: "
+                                "(i) a stationary technical unit; "
+                                "(ii) a CO2 transport infrastructure;",
+                        payload_layout=[
+                            "     ‘(e) ‘installation’ means either of the following:",
+                            "     (i) a stationary technical unit;",
+                            "     (ii) a CO2 transport infrastructure;’;",
+                        ])
+    changeset = ChangeSet(act=act, changes=build_changes(
+        Resolution(instr, node=point, status="resolved")
+    ))
+    result = emit_document(act, changeset, tmp_path / "a.docx")
+    styles = {style for style, _ in _styled(result.path)}
+    assert "OJ Subpoint" in styles
+
+
 def test_inserted_text_without_an_article_keeps_its_anchors_level(tmp_path):
     """A point added to a list of points is still a point, not body text."""
     act = make_act()
@@ -446,6 +487,150 @@ def test_no_version_warning_adds_nothing(tmp_path):
     result = emit_document(act, ChangeSet(act=act), tmp_path / "a.docx",
                            version_warning=None)
     assert "Version warning" not in texts(load(result.path))
+
+
+# ------------------------------------------------------- numbered paragraphs
+#
+# EUR-Lex keeps a paragraph's number outside its words, so a numbered paragraph is a
+# node with a key and no text of its own. Whatever carries its first words has to
+# print the number, or the act loses its numbering entirely.
+
+
+def numbered_article() -> tuple[Act, Node]:
+    act = Act(celex="TESTACT", title="Test Directive")
+    article = act.root.add(Node(Kind.ARTICLE, key="10", title="Auctioning"))
+    first = article.add(Node(Kind.PARAGRAPH, key="1"))
+    first.add(Node(Kind.SUBPARAGRAPH, text="From 2019 onwards, Member States shall auction."))
+    first.add(Node(Kind.SUBPARAGRAPH, text="From 2021 onwards, without prejudice."))
+    second = article.add(Node(Kind.PARAGRAPH, key="1a"))
+    second.add(Node(Kind.SUBPARAGRAPH, text="Where the volume of allowances is lower."))
+    return act, article
+
+
+def test_a_numbered_paragraph_prints_its_number(tmp_path):
+    act, _ = numbered_article()
+    result = emit_document(act, ChangeSet(act=act), tmp_path / "a.docx")
+    assert [t for s, t in _styled(result.path) if s == "OJ Text"] == [
+        "1. From 2019 onwards, Member States shall auction.",
+        "From 2021 onwards, without prejudice.",   # a later subparagraph, unnumbered
+        "1a. Where the volume of allowances is lower.",
+    ]
+
+
+def test_a_replacement_restating_the_number_does_not_print_it_twice(tmp_path):
+    """Payloads are drafted restating the number — "1. …". Printed against a number
+    the act keeps outside its text, it would come out as "1. 1. …"."""
+    act, article = numbered_article()
+    paragraph = article.by_key(Kind.PARAGRAPH, "1")
+    instr = instruction(op=Op.REPLACE_NODE,
+                        payload="1. From 2019 onwards, Member States shall auction.")
+    changeset = ChangeSet(act=act, changes=build_changes(
+        Resolution(instr, node=paragraph, status="resolved")
+    ))
+    result = emit_document(act, changeset, tmp_path / "a.docx")
+
+    doc = load(result.path)
+    assert "1. 1." not in texts(doc)
+    # The number is unchanged, so it is not struck and re-inserted either.
+    assert "1." not in deleted_texts(doc)
+
+
+def test_a_deleted_paragraph_takes_its_number_with_it(tmp_path):
+    """Or accepting the deletion leaves a bare "1." standing over nothing."""
+    act, article = numbered_article()
+    paragraph = article.by_key(Kind.PARAGRAPH, "1")
+    changeset = ChangeSet(act=act, changes=build_changes(
+        Resolution(instruction(op=Op.DELETE_NODE), node=paragraph, status="resolved")
+    ))
+    result = emit_document(act, changeset, tmp_path / "a.docx")
+
+    doc = load(result.path)
+    assert "1. From 2019 onwards" in deleted_texts(doc)
+    assert "1. From 2019 onwards" not in texts(doc)
+
+
+def test_a_phrase_edit_leaves_the_number_alone(tmp_path):
+    """An edit inside the words never touches the number in front of them."""
+    act, article = numbered_article()
+    paragraph = article.by_key(Kind.PARAGRAPH, "1")
+    instr = instruction(op=Op.REPLACE_TEXT, find_text="2019", replace_text="2026")
+    changeset = ChangeSet(act=act, changes=build_changes(
+        Resolution(instr, node=paragraph, status="resolved")
+    ))
+    result = emit_document(act, changeset, tmp_path / "a.docx")
+
+    doc = load(result.path)
+    assert "2026" in texts(doc)
+    assert "2019" in deleted_texts(doc)
+    assert "1." not in deleted_texts(doc)
+    assert any(s == "OJ Text" and t.startswith("1. From")
+               for s, t in _styled(result.path))
+
+
+# ------------------------------------------------------------------- placement
+
+
+def numbered_act() -> Act:
+    act = Act(celex="TESTACT", title="Test Directive")
+    for key in ("28", "29", "29a", "30"):
+        act.root.add(Node(Kind.ARTICLE, key=key, title=f"Heading {key}"))
+    return act
+
+
+def article_sequence(path) -> list[str]:
+    return [
+        text.removeprefix("Article ")
+        for style, text in _styled(path) if style == "OJ Article"
+    ]
+
+
+def test_a_new_article_is_printed_where_its_number_belongs(tmp_path):
+    """An unplaced insertion used to pile up at the end of the document, so a new
+    Article 29b printed after Article 30 and everything else inserted before it."""
+    act = numbered_act()
+    instr = instruction(op=Op.INSERT_NODE, raw="the following Article 29b is inserted:")
+    inserted = change(ChangeKind.INSERT, None, instr=instr,
+                      anchor=act.article("29a"),
+                      new="Article 29b Member States shall report annually.")
+    result = emit_document(act, ChangeSet(act=act, changes=[inserted]),
+                           tmp_path / "a.docx")
+    assert article_sequence(result.path) == ["28", "29", "29a", "29b", "30"]
+
+
+def test_two_new_articles_sharing_a_place_keep_their_order(tmp_path):
+    """3gaa and 3gab are both inserted after 3ga — the second by an instruction
+    naming the first, which is not in the act yet. They print in the order given."""
+    act = numbered_act()
+    changes = [
+        change(ChangeKind.INSERT, None, anchor=act.article("29a"),
+               instr=instruction(id=f"1.{n}", op=Op.INSERT_NODE,
+                                 raw=f"the following Article {key} is inserted:"),
+               new=f"Article {key} Some new obligation.")
+        for n, key in enumerate(("29b", "29c"))
+    ]
+    result = emit_document(act, ChangeSet(act=act, changes=changes),
+                           tmp_path / "a.docx")
+    assert article_sequence(result.path) == ["28", "29", "29a", "29b", "29c", "30"]
+
+
+def test_an_insertion_lands_after_the_provision_it_is_anchored_to(tmp_path):
+    """"the following paragraphs are inserted after paragraph 1" must not land past
+    paragraph 2, which is where the end of the article is."""
+    act = Act(celex="TESTACT", title="Test Directive")
+    article = act.root.add(Node(Kind.ARTICLE, key="1"))
+    first = article.add(Node(Kind.PARAGRAPH, key="1", text="The first paragraph."))
+    article.add(Node(Kind.PARAGRAPH, key="2", text="The second paragraph."))
+
+    instr = instruction(op=Op.INSERT_NODE,
+                        raw="the following paragraph is inserted after paragraph 1:")
+    inserted = change(ChangeKind.INSERT, None, anchor=first, instr=instr,
+                      new="1a. A paragraph between the two.")
+    result = emit_document(act, ChangeSet(act=act, changes=[inserted]),
+                           tmp_path / "a.docx")
+    body = [text for style, text in _styled(result.path) if style == "OJ Text"]
+    assert body == ["1. The first paragraph.",
+                    "1a. A paragraph between the two.",
+                    "2. The second paragraph."]
 
 
 # ----------------------------------------------------- replacements, block by block
@@ -595,6 +780,104 @@ def test_layout_splits_a_payload_carrying_several_articles():
     articles = [p for p in provisions if p.is_article]
     assert [(a.key, a.title) for a in articles] == [
         ("25b", "ETS as a service"), ("25c", "Reporting obligations")
+    ]
+
+
+def test_points_set_at_one_margin_are_still_points():
+    """Article 1(2)(g) adds points (aj) to (ao) to Article 3, and the PDF sets the
+    lot as one wrapped block at a single indent. With no indentation to read, the
+    sequence is what says these are six points and not one paragraph."""
+    layout = [
+        "                 ‘(aj) ‘hazardous waste’ means hazardous waste as defined in",
+        "                 Article 3, point (2) of Directive 2008/98/EC;",
+        "                 (ak) ‘municipal waste’ means municipal waste as defined in",
+        "                 Article 3, point (2b) of that Directive;",
+        "                 (al) ‘synthetic fuels’ means renewable fuels of non-biological",
+        "                 origin;’;",
+    ]
+    provisions = structure(" ".join(l.strip() for l in layout), layout=layout)
+    assert kinds(provisions) == [("point", "aj"), ("point", "ak"), ("point", "al")]
+
+
+def test_sub_points_at_one_margin_still_nest():
+    """Article 1(2)(a) replaces point (e) with a point carrying two sub-points, all
+    set at the same indent. "(i)" is no successor of "(e)", but it opens a sequence
+    of its own — so it belongs a level down."""
+    layout = [
+        "           ‘(e) ‘installation’ means either of the following:",
+        "           (i) a stationary technical unit where one or more activities are",
+        "           carried out;",
+        "           (ii) a CO2 transport infrastructure as defined in Article 3(29);’;",
+    ]
+    provisions = structure(" ".join(l.strip() for l in layout), layout=layout)
+    assert kinds(provisions) == [
+        ("point", "e"), ("subpoint", "i"), ("subpoint", "ii")
+    ]
+
+
+def test_text_after_a_list_of_points_is_not_part_of_the_last_one():
+    """Article 3c(6) lists points (a) to (e) and then closes with a subparagraph of
+    the paragraph — "Fuels shall be eligible …". Its points wrap at column 11, so a
+    line back at column 5, where the markers sit, has left the list."""
+    layout = [
+        "     ‘6.    The allowances allocated under this paragraph shall cover:",
+        "     (a)   50 % of the remaining price differential between the use of fossil",
+        "           kerosene and advanced biofuels;",
+        "     (b)   60 % of the remaining price differential between the use of fossil",
+        "           kerosene and hydrogen from renewable energy sources;",
+        "     Fuels shall be eligible for support referred to in this paragraph only if",
+        "     they are produced in the EEA.’;",
+    ]
+    provisions = structure(" ".join(l.strip() for l in layout), layout=layout)
+    assert kinds(provisions) == [
+        ("paragraph", "6"), ("point", "a"), ("point", "b"), ("subparagraph", None)
+    ]
+    assert provisions[-1].text.startswith("Fuels shall be eligible")
+    assert "Fuels shall" not in provisions[-2].text
+
+
+def test_points_wrapping_flush_keep_their_own_wrapped_lines():
+    """Where a payload sets a point's continuation flush with its marker there is no
+    outdent to read, and an unmarked line has to stay part of the point it follows —
+    guessing a boundary would move words from one provision to another."""
+    layout = [
+        "       ‘(aj) ‘hazardous waste’ means hazardous waste as defined in",
+        "       Article 3, point (2) of Directive 2008/98/EC;",
+        "       (ak) ‘municipal waste’ means municipal waste;’;",
+    ]
+    provisions = structure(" ".join(l.strip() for l in layout), layout=layout)
+    assert kinds(provisions) == [("point", "aj"), ("point", "ak")]
+    assert provisions[0].text.endswith("Directive 2008/98/EC;")
+
+
+def test_i_after_h_is_a_letter_not_a_numeral():
+    """The reading that continues the open list wins, or every lettered list would
+    fall a level deeper when it reached (i)."""
+    layout = [
+        "           ‘(g) the seventh point;",
+        "           (h) the eighth point;",
+        "           (i) the ninth point;",
+        "           (j) the tenth point;’;",
+    ]
+    provisions = structure(" ".join(l.strip() for l in layout), layout=layout)
+    assert kinds(provisions) == [
+        ("point", "g"), ("point", "h"), ("point", "i"), ("point", "j")
+    ]
+
+
+def test_an_outdented_block_does_not_relevel_the_payload():
+    """The body's left margin is where it starts, not the shallowest line in it.
+    Article 1(4)(a) of COM(2026) 616 closes with a subparagraph set further out than
+    the paragraph it belongs to; measuring from that would make the paragraph's own
+    "1." look like a point of something."""
+    layout = [
+        "                 ‘1.     In respect of ships, the following applies:",
+        "                       (a)   half of the emissions released during voyages;",
+        "           However, this shall not apply to offshore operations.’;",
+    ]
+    provisions = structure(" ".join(l.strip() for l in layout), layout=layout)
+    assert kinds(provisions) == [
+        ("paragraph", "1"), ("point", "a"), ("subparagraph", None)
     ]
 
 
