@@ -85,3 +85,7 @@ English are out of scope. Output documents follow the typography of the Official
 Journal — Times New Roman, 10pt justified body, centred article headings.
 
 See `PLAN.md` for the design and the reasoning behind it.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
