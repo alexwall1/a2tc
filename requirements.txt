@@ -1,0 +1,12 @@
+# Runtime dependencies. Kept in step with [project.dependencies] in pyproject.toml —
+# `pip install -e .` is the preferred install; this file is for environments that
+# want a plain requirements pin.
+#
+# For the test suite: pip install -e ".[dev]"
+
+click>=8.1
+python-docx>=1.2.0   # 1.2 adds Document.add_comment
+eurlex-builder==0.1.1  # pinned: we depend on its parquet output schema
+polars>=1.0
+lxml>=5.0
+requests>=2.31

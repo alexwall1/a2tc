@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a2t"
+version = "0.1.0"
+description = "Convert EU legislative amendment proposals into tracked-changes Word documents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "python-docx>=1.2.0",   # 1.2 adds Document.add_comment
+    "eurlex-builder==0.1.1", # pinned: we depend on its parquet output schema
+    "polars>=1.0",
+    "lxml>=5.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+a2t = "a2t.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["a2t*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

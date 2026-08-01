@@ -1,0 +1,298 @@
+"""Phase 5: resolving instruction targets to nodes of the base act."""
+
+from pathlib import Path as FsPath
+
+import pytest
+
+from a2t.detect.targets import detect_targets
+from a2t.extract.deboilerplate import operative_part
+from a2t.extract.pdf import extract_lines
+from a2t.model.assemble import assemble
+from a2t.model.instruction import Op
+from a2t.model.path import Path, Step
+from a2t.model.tree import Kind
+from a2t.parse.rules import classify_all
+from a2t.parse.segment import segment
+from a2t.resolve.resolver import (
+    PLAUSIBLE,
+    _is_redundant,
+    parse_enumeration,
+    parse_phrase,
+    resolve_block,
+    targets_title,
+)
+
+ROOT = FsPath(__file__).resolve().parents[1]
+PDF = ROOT / "amendment_proposal_ets.pdf"
+CACHE = {
+    "32003L0087": ROOT / "out" / "cache" / "02003L0087-20240301",
+    "32015D1814": ROOT / "out" / "cache" / "02015D1814-20240101",
+}
+
+pytestmark = pytest.mark.skipif(
+    not PDF.is_file() or not all((p / "works.parquet").is_file() for p in CACHE.values()),
+    reason="run `a2t retrieve amendment_proposal_ets.pdf --cache out/cache` first",
+)
+
+
+@pytest.fixture(scope="module")
+def reports():
+    import polars as pl
+
+    lines = extract_lines(PDF)
+    operative = operative_part(lines).lines
+    blocks = segment(operative, detect_targets(operative, lines).targets)
+    classify_all(blocks)
+
+    out = {}
+    for block in blocks:
+        works = pl.read_parquet(CACHE[block.celex] / "works.parquet").row(0, named=True)
+        act = assemble(works["full_text_html"], block.celex, works["title"])
+        out[block.celex] = (block, act, resolve_block(block, act))
+    return out
+
+
+@pytest.fixture(scope="module")
+def directive(reports):
+    return reports["32003L0087"]
+
+
+@pytest.fixture(scope="module")
+def resolutions(reports):
+    return {
+        r.instruction.id: r
+        for _, _, report in reports.values()
+        for r in report.results
+    }
+
+
+# --------------------------------------------------------------- phrase parsing
+
+
+@pytest.mark.parametrize(
+    "phrase, steps",
+    [
+        ("Article 10a", [Step(Kind.ARTICLE, key="10a")]),
+        ("paragraph 1a", [Step(Kind.PARAGRAPH, key="1a")]),
+        ("point (e)", [Step(Kind.POINT, key="e")]),
+        ("point (ag)", [Step(Kind.POINT, key="ag")]),
+        ("the second subparagraph", [Step(Kind.SUBPARAGRAPH, index=2)]),
+        ("the penultimate sentence", [Step(Kind.SENTENCE, index=-2)]),
+        ("the fourth subparagraph", [Step(Kind.SUBPARAGRAPH, index=4)]),
+        ("paragraph 1, second sentence",
+         [Step(Kind.PARAGRAPH, key="1"), Step(Kind.SENTENCE, index=2)]),
+        ("the title of Chapter III", [Step(Kind.CHAPTER, key="iii")]),
+    ],
+)
+def test_parse_phrase(phrase, steps):
+    assert parse_phrase(phrase) == steps
+
+
+def test_unparseable_phrase_yields_nothing():
+    assert parse_phrase("something unlike an address") == []
+    assert parse_phrase(None) == []
+
+
+def test_targets_title_detection():
+    assert targets_title("the title of Chapter III")
+    assert not targets_title("Chapter III")
+
+
+def test_redundant_scope_detection():
+    context = Path((Step(Kind.ARTICLE, key="9"),))
+    assert _is_redundant(context, [Step(Kind.ARTICLE, key="9")])
+    assert not _is_redundant(context, [Step(Kind.ARTICLE, key="10")])
+
+
+# -------------------------------------------------------------------- coverage
+
+
+def test_rule_engine_coverage(reports):
+    """112 of 114 resolve by rules alone; the other two are correctly refused.
+
+    They were previously "resolved" by falling back to the enclosing scope, which is
+    the silent-mistarget failure mode — see the test below.
+    """
+    total = sum(len(r.applicable) for _, _, r in reports.values())
+    resolved = sum(len(r.resolved) for _, _, r in reports.values())
+    assert total == 114
+    assert resolved == 112
+
+
+def test_unreadable_target_is_refused_not_widened(resolutions):
+    """An unparseable target must never fall back to its container.
+
+    `1.33.a` reads "in paragraph 7, first subparagraph, the sole footnote is deleted".
+    Falling back to the scope would delete the whole subparagraph rather than its
+    footnote — a destructive edit that looks like a clean resolution. Both cases are
+    handed to the LLM tier instead.
+    """
+    for ident in ("1.14.a", "1.33.a"):
+        result = resolutions[ident]
+        assert not result.ok, ident
+        assert "could not be parsed" in result.reason
+        assert "refusing to fall back" in result.reason
+
+
+def test_annex_amendment_is_not_applicable(resolutions):
+    assert resolutions["1.35"].status == "not-applicable"
+
+
+# ------------------------------------------------------------ scope accumulation
+
+
+def test_nested_scope_accumulates(resolutions):
+    """(15) Article 10a -> (b) paragraph 1a -> (i) the second subparagraph."""
+    node = resolutions["1.15.b.i"].node
+    assert node.citation.endswith("Article 10a / paragraph 1a / subparagraph 2")
+
+
+def test_container_scope_applies_to_children(resolutions):
+    assert resolutions["1.2.b"].node.citation.endswith("Article 3 / point (h)")
+
+
+def test_scope_prefix_is_applied(resolutions):
+    """Art. 1(8): 'in Article 4, ...' resolves to Article 4."""
+    assert resolutions["1.8"].node.citation.endswith("Article 4")
+
+
+def test_redundant_rescope_does_not_double_apply(resolutions):
+    """Art. 1(12)(b) says 'in Article 9' while already inside Article 9."""
+    result = resolutions["1.12.b"]
+    assert result.ok
+    assert result.node.citation.endswith("Article 9")
+    assert any("redundant scope" in n for n in result.instruction.notes)
+
+
+def test_article_step_is_absolute(resolutions):
+    """An Article scope restarts from the act root rather than nesting."""
+    assert resolutions["1.1"].node is not None
+    assert "Article 2" in resolutions["1.1"].node.citation
+
+
+# ------------------------------------------------------------------- addressing
+
+
+def test_ordinal_counted_across_subtree(resolutions):
+    """'in Article 2, the first subparagraph' lives under paragraph 1."""
+    result = resolutions["1.1"]
+    assert result.ok
+    assert result.node.kind is Kind.SUBPARAGRAPH
+
+
+def test_chapter_title_edit_resolves(resolutions):
+    """Art. 1(10): in the title of Chapter III the word 'stationary' is deleted."""
+    result = resolutions["1.10"]
+    assert result.ok
+    assert result.node.kind is Kind.CHAPTER
+    assert result.node.title == "STATIONARY INSTALLATIONS"
+
+
+def test_new_article_inserts_at_act_root(resolutions):
+    """'the following Article 3gaa is inserted' has no existing target node."""
+    result = resolutions["1.5"]
+    assert result.ok
+    assert result.instruction.op is Op.INSERT_NODE
+    assert result.node.kind is Kind.ACT
+
+
+def test_text_replacement_verifies_the_phrase_exists(resolutions):
+    """Art. 1(8) must actually find 'Article 27' inside Article 4."""
+    result = resolutions["1.8"]
+    assert result.ok
+    assert "Article 27" in result.node.full_text
+
+
+# ------------------------------------------------------------------ enumerations
+
+
+@pytest.mark.parametrize(
+    "phrase, kind, keys",
+    [
+        ("paragraphs 3-e, 3-d, 3-c, and 3-b", Kind.PARAGRAPH,
+         ["3-e", "3-d", "3-c", "3-b"]),
+        ("paragraphs 8 and 8a", Kind.PARAGRAPH, ["8", "8a"]),
+        ("points (a), (b) and (c)", Kind.POINT, ["a", "b", "c"]),
+    ],
+)
+def test_parse_enumeration(phrase, kind, keys):
+    assert parse_enumeration(phrase) == (kind, keys)
+
+
+@pytest.mark.parametrize("phrase", ["paragraph 6", "Article 10a", "point (h)", None])
+def test_single_targets_are_not_enumerations(phrase):
+    assert parse_enumeration(phrase) is None
+
+
+def test_hyphenated_paragraph_keys_exist(directive):
+    """The ETS Directive numbers Article 12 paragraphs 3-a ... 3-e."""
+    _, act, _ = directive
+    keys = [p.key for p in act.article("12").of_kind(Kind.PARAGRAPH)]
+    for key in ["3-a", "3-b", "3-c", "3-d", "3-e"]:
+        assert key in keys
+
+
+def test_enumerated_scope_applies_to_every_paragraph(resolutions):
+    """Art. 1(22)(b) edits a date in four paragraphs at once."""
+    result = resolutions["1.22.b"]
+    assert result.ok and result.enumerated
+    assert [n.key for n in result.targets] == ["3-e", "3-d", "3-c", "3-b"]
+    # the phrase being replaced must be present in each of them
+    assert all(result.instruction.find_text in n.full_text for n in result.targets)
+
+
+def test_enumerated_target_deletes_every_paragraph(resolutions):
+    """Art. 1(15)(j): 'paragraphs 8 and 8a are deleted'.
+
+    Without enumeration handling the phrase fails to parse and the instruction
+    collapses onto its container — deleting the whole of Article 10a.
+    """
+    result = resolutions["1.15.j"]
+    assert result.ok and result.enumerated
+    assert result.instruction.op is Op.DELETE_NODE
+    assert [n.key for n in result.targets] == ["8", "8a"]
+    assert all("Article 10a" in n.citation for n in result.targets)
+
+
+def test_single_target_resolution_still_has_one_target(resolutions):
+    result = resolutions["1.2.b"]
+    assert not result.enumerated
+    assert len(result.targets) == 1
+
+
+# --------------------------------------------------------------- plausibility
+
+
+def test_numbering_error_in_the_proposal_is_flagged(resolutions):
+    """Art. 1(7)(b) says 'the second subparagraph' but supplies the third.
+
+    The replacement restates the existing third subparagraph almost verbatim and
+    refers to 'the report referred to in the second subparagraph', so it cannot be
+    that subparagraph. Confirmed against the official consolidated PDF.
+    """
+    result = resolutions["1.7.b"]
+    assert result.ok, "the instruction is still applied as written"
+    assert result.needs_review
+    assert result.plausibility < PLAUSIBLE
+    assert "subparagraph 3" in result.doubt
+    assert "applied as written" in result.doubt
+
+
+def test_instruction_is_not_silently_retargeted(resolutions):
+    """Applying the drafter's words is the contract; correcting them is not."""
+    result = resolutions["1.7.b"]
+    assert result.node.index == 2
+    assert result.instruction.confidence <= 0.5
+
+
+def test_plausible_replacements_are_not_flagged(resolutions):
+    """A normal rewrite of the same provision must not be marked for review."""
+    result = resolutions["1.2.b"]  # Article 3 point (h)
+    assert result.ok and not result.needs_review
+    assert result.plausibility > PLAUSIBLE
+
+
+def test_review_list_is_small_and_specific(reports):
+    doubtful = [r for _, _, report in reports.values() for r in report.doubtful]
+    assert 0 < len(doubtful) <= 10
+    assert all(r.doubt for r in doubtful)

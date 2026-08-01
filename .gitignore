@@ -1,0 +1,29 @@
+# Secrets — the LLM tier reads this file from the project root
+.openrouter_key
+
+# Sample legislation. Proposals and consolidated acts are public documents on
+# EUR-Lex; they are large, they are not ours, and the tests skip cleanly without
+# them. Fetch what you need locally instead of committing it.
+*.pdf
+
+# Generated output: tracked-changes documents, reports, retrieval and LLM caches
+/out*/
+*.docx
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# Local Claude Code settings (shared config belongs in .claude/settings.json)
+.claude/settings.local.json
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
