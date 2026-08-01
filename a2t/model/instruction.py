@@ -33,6 +33,10 @@ class Instruction:
     target_text: str | None = None  # "the first subparagraph", "point (e)"
     payload: str | None = None  # verbatim replacement text, quotes stripped
     payload_lines: tuple[int, int] | None = None
+    # The payload's source lines, indentation intact. `payload` is normalised for
+    # comparison and so cannot be printed with its structure; these can (see
+    # `a2t.model.payload`).
+    payload_layout: list[str] = field(default_factory=list)
     find_text: str | None = None  # for REPLACE_TEXT / DELETE_TEXT
     replace_text: str | None = None
     footnotes: list[str] = field(default_factory=list)

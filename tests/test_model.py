@@ -71,6 +71,19 @@ def test_unnumbered_subparagraphs_recovered(act):
     assert subs[3].text.startswith("From 1 January 2026 and 1 January 2027")
 
 
+def test_points_are_not_also_counted_as_subparagraphs(act):
+    """A point's text is marked up as `p.norm` like any other block, so sweeping
+    every descendant would add each point twice — once without its marker. Article
+    10(3) is the case: five subparagraphs around a list of fourteen points."""
+    paragraph = act.article("10").by_key(Kind.PARAGRAPH, "3")
+    subs = paragraph.of_kind(Kind.SUBPARAGRAPH)
+    points = paragraph.of_kind(Kind.POINT)
+
+    assert len(points) == 14
+    assert len(subs) == 5
+    assert not any(sub.text == point.text for sub in subs for point in points)
+
+
 def test_article_10a_paragraph_sequence(act):
     """Matches the official PDF exactly, including gaps left by earlier repeals."""
     keys = [p.key for p in act.article("10a").of_kind(Kind.PARAGRAPH)]

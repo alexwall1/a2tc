@@ -274,7 +274,8 @@ class _Segmenter:
         payload_lines = text_lines[consumed:]
         if not payload_lines:
             return
-        instruction.payload, instruction.footnotes = _extract_payload(payload_lines)
+        (instruction.payload, instruction.footnotes,
+         instruction.payload_layout) = _extract_payload(payload_lines)
         instruction.payload_lines = (
             payload_lines[0].lineno, payload_lines[-1].lineno
         )
@@ -297,8 +298,13 @@ def _truncate_at_close(lines: list[Line]) -> list[Line]:
     return lines
 
 
-def _extract_payload(lines: list[Line]) -> tuple[str, list[str]]:
-    """Join payload lines, split off any footnote block, and strip the outer quotes."""
+def _extract_payload(lines: list[Line]) -> tuple[str, list[str], list[str]]:
+    """Join payload lines, split off any footnote block, and strip the outer quotes.
+
+    The body's lines are returned alongside the joined text, indentation intact: the
+    joining is lossy, and printing the payload as legislation needs the structure that
+    the layout — and only the layout — still records. See `a2t.model.payload`.
+    """
     lines = _truncate_at_close(lines)
     rule = next(
         (i for i, line in enumerate(lines) if PAYLOAD_RULE.match(line.text)), None
@@ -322,7 +328,7 @@ def _extract_payload(lines: list[Line]) -> tuple[str, list[str]]:
         joined = " ".join(line.stripped for line in footnote_lines)
         joined = re.sub(rf"{CLOSE_QUOTE}\s*[;.]?\s*$", "", joined).strip()
         footnotes = [f for f in re.split(r"\s(?=\*\s)", joined) if f.strip()]
-    return text, footnotes
+    return text, footnotes, [line.text for line in body]
 
 
 _HEADING = re.compile(r"^(?:Article\s+\d+|Amendments?\s+to\s+.+|)$", re.I)

@@ -53,6 +53,7 @@ OJ_STYLES = {
     "OJ Article Title": (10, True,  False, ALIGN.CENTER,   0, 12, 0.0),
     "OJ Text":          (10, False, False, ALIGN.JUSTIFY,  0,  6, 0.0),
     "OJ Point":         (10, False, False, ALIGN.JUSTIFY,  0,  6, 1.0),
+    "OJ Subpoint":      (10, False, False, ALIGN.JUSTIFY,  0,  6, 2.0),
     "OJ Heading":       (10, True,  False, ALIGN.LEFT,    18,  6, 0.0),
 }
 

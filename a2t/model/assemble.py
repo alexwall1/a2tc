@@ -125,13 +125,30 @@ def _add_points(parent: Node, container, kind: Kind = Kind.POINT) -> None:
             _add_points(point, col2[0], sub_kind)
 
 
+def _within_point(el, stop) -> bool:
+    """Is `el` inside a point, rather than a sibling of one?"""
+    parent = el.getparent()
+    while parent is not None and parent is not stop:
+        if _has_class(parent, "grid-container"):
+            return True
+        parent = parent.getparent()
+    return False
+
+
 def _add_subparagraphs(target: Node, el) -> None:
-    """Add `p.norm` blocks inside `el` as subparagraphs of `target`."""
+    """Add `p.norm` blocks inside `el` as subparagraphs of `target`.
+
+    A point's text is itself marked up as `p.norm`, so sweeping every descendant
+    would add each point twice — once here without its marker and once as a point.
+    `_add_points` owns everything inside a `grid-container`.
+    """
     added = False
     for child in el.iter():
         if not isinstance(child.tag, str) or child.tag != "p":
             continue
         if not _has_class(child, "norm") or _has_class(child, "modref"):
+            continue
+        if _within_point(child, el):
             continue
         text = clean_text(child)
         if text:

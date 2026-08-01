@@ -11,12 +11,13 @@ from a2t.apply.changeset import (
     build_changes,
     build_changeset,
 )
-from a2t.apply.diff import Span, diff, summarise
+from a2t.apply.diff import Span, align, diff, summarise
 from a2t.detect.targets import detect_targets
 from a2t.extract.deboilerplate import operative_part
 from a2t.extract.pdf import extract_lines
 from a2t.model.assemble import assemble
 from a2t.model.instruction import Instruction, Op
+from a2t.model.payload import Provision, from_node, structure
 from a2t.model.tree import Act, Kind, Node
 from a2t.parse.rules import classify_all
 from a2t.parse.segment import segment
@@ -89,6 +90,120 @@ def test_threshold_is_configurable():
 
 def test_summarise_reports_word_counts():
     assert "-1 +1 words" in summarise(diff("a b c", "a d c"))
+
+
+# ---------------------------------------------------------------- block alignment
+#
+# A provision replaced in full is not one edit but many: some of its paragraphs
+# survive with a word changed, some are rewritten, some go, some are new.
+
+
+def blocks(*specs) -> list[Provision]:
+    return [Provision(kind, key, text) for kind, key, text in specs]
+
+
+def test_surviving_blocks_are_matched_and_diffed_word_by_word():
+    old = blocks((Kind.PARAGRAPH, "1", "Reports are due by 31 December 2030."),
+                 (Kind.PARAGRAPH, "2", "The Commission shall publish them."))
+    new = blocks((Kind.PARAGRAPH, "1", "Reports are due by 31 December 2035."),
+                 (Kind.PARAGRAPH, "2", "The Commission shall publish them."))
+    pairs = align(old, new)
+
+    assert len(pairs) == 2
+    assert all(p.old is not None and p.new is not None for p in pairs)
+    assert pairs[0].edit.mode == "word"
+    assert pairs[0].edit.deleted_text.strip() == "2030."
+    assert pairs[1].edit.mode == "unchanged"
+
+
+def test_a_block_matching_nothing_stands_alone():
+    old = blocks((Kind.PARAGRAPH, "1", "The old rule on reporting."))
+    new = blocks((Kind.PARAGRAPH, "1", "The old rule on reporting."),
+                 (Kind.PARAGRAPH, "2", "An entirely unrelated new obligation."))
+    pairs = align(old, new)
+
+    assert [(p.old is None, p.new is None) for p in pairs] == [(False, False),
+                                                               (True, False)]
+    assert pairs[1].edit.spans == [Span("insert", "2. An entirely unrelated new "
+                                                 "obligation.")]
+
+
+def test_a_renumbered_block_still_matches_its_predecessor():
+    """A provision keeps its number across a rewrite more reliably than its words,
+    so paragraph 3 pairs with paragraph 3 however little of it survives."""
+    old = blocks((Kind.PARAGRAPH, "3", "Member States shall notify the Commission."))
+    new = blocks((Kind.PARAGRAPH, "3", "Operators shall keep records for ten years."))
+    pairs = align(old, new)
+
+    assert len(pairs) == 1
+    assert pairs[0].old is not None and pairs[0].new is not None
+
+
+def test_alignment_keeps_document_order():
+    old = blocks((Kind.PARAGRAPH, "1", "First."), (Kind.PARAGRAPH, "2", "Second."),
+                 (Kind.PARAGRAPH, "3", "Third."))
+    new = blocks((Kind.PARAGRAPH, "1", "First."), (Kind.PARAGRAPH, "3", "Third."))
+    pairs = align(old, new)
+    assert [p.block.key for p in pairs] == ["1", "2", "3"]
+    assert pairs[1].new is None
+
+
+def test_markers_are_part_of_what_is_diffed():
+    """Renumbering has to show as a revision, not happen silently between two
+    paragraphs that read as unchanged."""
+    old = blocks((Kind.POINT, "a", "the same words exactly."))
+    new = blocks((Kind.POINT, "b", "the same words exactly."))
+    pairs = align(old, new)
+    assert pairs[0].edit.deleted_text.strip() == "(a)"
+    assert pairs[0].edit.inserted_text.strip() == "(b)"
+
+
+def test_alignment_loses_no_text():
+    old = blocks((Kind.PARAGRAPH, "1", "One."), (Kind.SUBPARAGRAPH, None, "Two."))
+    new = blocks((Kind.PARAGRAPH, "1", "One, amended."),
+                 (Kind.POINT, "a", "Three."))
+    pairs = align(old, new)
+    assert [p.edit.old_text for p in pairs if p.old] == ["1. One.", "Two."]
+    assert [p.edit.new_text for p in pairs if p.new] == ["1. One, amended.",
+                                                         "(a) Three."]
+
+
+def test_single_block_replacement_is_not_aligned():
+    """One paragraph against one paragraph has nothing to align, and the
+    whole-provision diff already reads correctly."""
+    act = make_act()
+    node = act.article("3").by_key(Kind.POINT, "h")
+    instr = instruction(Op.REPLACE_NODE, payload="‘new entrant’ means a new thing.")
+    change = build_changes(Resolution(instr, node=node, status="resolved"))[0]
+    assert change.blocks == []
+
+
+def test_replacement_matching_nothing_keeps_the_whole_diff():
+    """A provision whose subparagraphs the act records but whose replacement text
+    the PDF gives as one undivided run: no old block resembles the single new one
+    closely enough to pair with it, yet the two sides taken whole differ by a word.
+
+    Aligning that would print the provision as a wholesale deletion followed by a
+    wholesale re-insertion, burying the one word that changed. The whole-provision
+    diff the change set already holds is the better reading, so it is kept."""
+    parts = [f"Subparagraph {n} of this paragraph imposes its own obligation."
+             for n in range(1, 8)]
+    act = Act(celex="TEST", title="t")
+    paragraph = act.root.add(Node(Kind.ARTICLE, key="9")).add(
+        Node(Kind.PARAGRAPH, key="1")
+    )
+    for text in parts:
+        paragraph.add(Node(Kind.SUBPARAGRAPH, text=text))
+
+    instr = instruction(Op.REPLACE_NODE,
+                        payload=" ".join(parts).replace("obligation", "duty", 1))
+    change = build_changes(Resolution(instr, node=paragraph, status="resolved"))[0]
+
+    assert change.edit.mode == "word"          # one word apart, taken whole
+    assert align(from_node(paragraph), structure(change.new_text)) != []
+    assert all(p.old is None or p.new is None  # …but nothing pairs block to block
+               for p in align(from_node(paragraph), structure(change.new_text)))
+    assert change.blocks == []
 
 
 # -------------------------------------------------------------------- substitution

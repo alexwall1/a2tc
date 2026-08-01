@@ -16,8 +16,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from a2t.apply.changeset import Change, ChangeKind, ChangeSet
-from a2t.apply.diff import diff
+from a2t.apply.diff import Pair, diff
 from a2t.emit.tracked_docx import TrackedDocx
+from a2t.model.payload import Provision, printed, structure
 from a2t.model.tree import Act, Kind, Node
 
 def _restates_heading(text: str, key: str | None) -> bool:
@@ -27,29 +28,20 @@ def _restates_heading(text: str, key: str | None) -> bool:
     return bool(re.match(rf"^\s*Article\s+{re.escape(key)}\b", text, re.I))
 
 
-# "the following Article 3gaa is inserted" — the instruction names what it inserts.
+# "the following Article 3gaa is inserted" — the instruction sometimes names what it
+# inserts. Only a fallback: most do not ("the following Articles are inserted"), so
+# the article's own number is read out of the payload's layout instead.
 INSERTS_ARTICLE = re.compile(r"\bfollowing\s+Article\s+(?P<key>\d+[a-z]*)\b", re.I)
 
 
-def _split_heading(text: str, key: str | None) -> tuple[str, str] | None:
-    """Split a payload that opens with `Article <key>` into heading and remainder.
-
-    Keyed on the article the instruction actually names, so a payload that merely
-    opens with a cross-reference to a *different* article is left alone.
-    """
-    if not key or not text:
-        return None
-    match = re.match(rf"^\s*(Article\s+{re.escape(key)})\b[.:]?\s+(.*)$",
-                     text, re.I | re.S)
-    if match is None or not match.group(2).strip():
-        return None
-    return match.group(1), match.group(2).strip()
-
-
-def _inserted_heading(change: Change) -> tuple[str, str] | None:
-    """The heading an inserted article carries inside its own payload."""
+def _provisions(change: Change) -> list[Provision]:
+    """The payload of `change`, split into the blocks it should be printed as."""
     named = INSERTS_ARTICLE.search(change.instruction.raw or "")
-    return _split_heading(change.new_text, named.group("key")) if named else None
+    return structure(
+        change.new_text,
+        layout=change.instruction.payload_layout,
+        named=named.group("key") if named else None,
+    )
 
 
 # Changes that consume the whole provision, so its children must not be rendered too.
@@ -139,11 +131,12 @@ class DocumentEmitter:
             self._chapter(node, changes, deleted)
         elif node.kind is Kind.ARTICLE:
             # A replacement payload usually restates the article heading, so keeping
-            # the original one too would print "Article 2" twice.
-            restates = (
-                whole is not None
-                and whole.kind is ChangeKind.REPLACE
-                and _restates_heading(whole.new_text, node.key)
+            # the original one too would print "Article 2" twice. Where the change was
+            # resolved block by block the heading is one of those blocks, and is
+            # printed — and diffed against the act's own — from there.
+            restates = whole is not None and whole.kind is ChangeKind.REPLACE and (
+                any(pair.block.is_article for pair in whole.blocks) if whole.blocks
+                else _restates_heading(whole.new_text, node.key)
             )
             if not restates:
                 self._article(node, changes, deleted)
@@ -218,27 +211,81 @@ class DocumentEmitter:
             self.result.paragraphs += 1
 
     def _whole_node(self, node: Node, change: Change) -> None:
-        mark = "del" if change.kind is ChangeKind.DELETE else None
-        block = self.doc.from_spans(change.edit.spans, style=self._style(node),
-                                    paragraph_mark=mark)
-        self._account(change, block)
+        if not change.blocks:
+            mark = "del" if change.kind is ChangeKind.DELETE else None
+            block = self.doc.from_spans(change.edit.spans, style=self._style(node),
+                                        paragraph_mark=mark)
+            self._account(change, block)
+            return
+
+        written = [
+            block for pair in change.blocks for block in self._aligned(pair)
+        ]
+        # `_account` counts the last one.
+        self.result.paragraphs += len(written) - 1
+        self._account(change, written[0])
+
+    def _aligned(self, pair: Pair) -> list:
+        """The Word paragraphs one step of an alignment is written as.
+
+        A block present on only one side is wholly inserted or wholly deleted, and its
+        paragraph mark goes with it — otherwise accepting the change would leave the
+        paragraph break of a provision that is no longer there.
+        """
+        mark = "ins" if pair.old is None else "del" if pair.new is None else None
+        block = pair.block
+        style = "OJ Article" if block.is_article else self._style(block)
+        written = [self.doc.from_spans(pair.edit.spans, style=style,
+                                       paragraph_mark=mark)]
+        if pair.title is not None:
+            written.append(self.doc.from_spans(pair.title.spans,
+                                               style="OJ Article Title",
+                                               paragraph_mark=mark))
+        return written
 
     def _insertions_for(self, node: Node) -> None:
         for change in self.by_node.get(id(node), []):
             if change.kind is not ChangeKind.INSERT:
                 continue
-            # An inserted article arrives as one flat payload with its heading at the
-            # front. Left whole it would sit in the body text, breaking the run of
-            # centred article headings down the document.
-            split = _inserted_heading(change)
-            if split is not None:
-                heading, body = split
-                self.doc.inserted(heading, style="OJ Article")
-                self.result.paragraphs += 1
-                block = self.doc.inserted(body, style=self._style(node))
-            else:
-                block = self.doc.inserted(change.new_text, style=self._style(node))
-            self._account(change, block)
+            # An insertion arrives as one flat payload. Written whole it would sit in
+            # the body text as a single justified block — article headings out of the
+            # run of centred headings, numbered paragraphs and points run together.
+            blocks = [
+                self.doc.inserted(text, style=style)
+                for text, style in self._printed(_provisions(change), node)
+            ]
+            if not blocks:
+                blocks = [self.doc.inserted(change.new_text,
+                                            style=self._style(node))]
+            # `_account` counts the last one.
+            self.result.paragraphs += len(blocks) - 1
+            self._account(change, blocks[0])
+
+    def _printed(self, provisions: list[Provision],
+                 anchor: Node) -> list[tuple[str, str]]:
+        """(text, style) per Word paragraph, for a payload already split into blocks.
+
+        An article contributes two paragraphs of its own — its number and its title —
+        because the Official Journal centres them separately.
+        """
+        out: list[tuple[str, str]] = []
+        # Text inserted below an article heading is that article's body. Text inserted
+        # without one lands inside the provision it is anchored to, and reads at that
+        # provision's level — a point added to a list of points is still a point.
+        opens_article = any(p.is_article for p in provisions)
+        for provision in provisions:
+            if provision.is_article:
+                out.append((f"Article {provision.key}", "OJ Article"))
+                if provision.title:
+                    out.append((provision.title, "OJ Article Title"))
+                continue
+            style = (
+                self._style(anchor)
+                if provision.kind is Kind.SUBPARAGRAPH and not opens_article
+                else self._style(provision)
+            )
+            out.append((self._prefixed(provision), style))
+        return out
 
     def _unplaced(self) -> None:
         """Report anything that could not be attached to a provision."""
@@ -262,18 +309,16 @@ class DocumentEmitter:
 
     # ---------------------------------------------------------------- helpers
 
-    def _style(self, node: Node) -> str:
-        if node.kind in (Kind.POINT, Kind.SUBPOINT):
+    def _style(self, node: Node | Provision) -> str:
+        if node.kind is Kind.SUBPOINT:
+            return "OJ Subpoint"
+        if node.kind is Kind.POINT:
             return "OJ Point"
         return "OJ Text"
 
-    def _prefixed(self, node: Node) -> str:
+    def _prefixed(self, node: Node | Provision) -> str:
         """Numbered provisions read better with their marker."""
-        if node.kind is Kind.PARAGRAPH and node.key:
-            return f"{node.key}. {node.text}"
-        if node.kind in (Kind.POINT, Kind.SUBPOINT) and node.key:
-            return f"({node.key}) {node.text}"
-        return node.text
+        return printed(node)
 
     def _account(self, change: Change, block, count_paragraph: bool = True) -> None:
         self._seen.add(id(change))

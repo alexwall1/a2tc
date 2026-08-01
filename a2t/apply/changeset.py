@@ -15,8 +15,9 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
-from a2t.apply.diff import Edit, diff
+from a2t.apply.diff import Edit, Pair, align, diff
 from a2t.model.instruction import Instruction, Op
+from a2t.model.payload import Provision, from_node, structure
 from a2t.model.tree import Act, Kind, Node
 from a2t.resolve.resolver import Resolution, ResolutionReport
 
@@ -40,6 +41,10 @@ class Change:
     new_text: str = ""
     edit: Edit | None = None
     note: str | None = None
+    # A whole-provision change resolved block by block. `edit` still covers the whole
+    # provision — the report speaks of the change as one thing — but the document is
+    # written from these, so a replacement reads paragraph against paragraph.
+    blocks: list[Pair] = field(default_factory=list)
 
     @property
     def citation(self) -> str:
@@ -146,6 +151,31 @@ def split_enumerated_payload(payload: str, keys: list[str]) -> list[str] | None:
     return segments if all(segments) else None
 
 
+def _blocks(instruction: Instruction, node: Node, payload: str, whole: Edit,
+            layout: list[str] | None = None) -> list[Pair]:
+    """Resolve a whole-provision change block by block.
+
+    Only where doing so tells the reader something. A provision that is a single
+    paragraph on both sides has nothing to align. And an alignment in which no block
+    matched any other says only that the two sides could not be put side by side —
+    if the provision as a whole still diffs word by word, that reading is the better
+    one, and it is what the change set already holds.
+    """
+    old = from_node(node)
+    new = structure(payload, layout) if payload else []
+    # A payload that restates the article's heading is compared against the heading
+    # the act already carries, so the two do not both get printed. One that does not
+    # restate it leaves the act's heading standing, untouched and outside the change.
+    if node.kind is Kind.ARTICLE and any(p.is_article for p in new):
+        old.insert(0, Provision(Kind.ARTICLE, node.key, title=node.title))
+    if len(old) < 2 and len(new) < 2:
+        return []
+    pairs = align(old, new)
+    if whole.mode == "word" and not any(p.old and p.new for p in pairs):
+        return []
+    return pairs
+
+
 def _rebase_sentence(sentence: Node, replacement: str) -> tuple[Node, str, str] | None:
     """Express a sentence-level edit against the provision that contains it.
 
@@ -250,6 +280,10 @@ def build_changes(resolution: Resolution,
                     ChangeKind.REPLACE, instruction, node=node,
                     old_text=node.full_text, new_text=segment,
                     edit=diff(node.full_text, segment),
+                    # The layout covers the whole payload, not this one segment of
+                    # it, so the segment's own markers have to do the work.
+                    blocks=_blocks(instruction, node, segment,
+                                   diff(node.full_text, segment)),
                     note=f"payload split across {len(targets)} provisions",
                 )
                 for node, segment in zip(targets, segments)
@@ -276,16 +310,21 @@ def build_changes(resolution: Resolution,
                 continue
             old = node.full_text
             new = instruction.payload or ""
+            edit = diff(old, new)
             changes.append(Change(
                 ChangeKind.REPLACE, instruction, node=node,
-                old_text=old, new_text=new, edit=diff(old, new),
+                old_text=old, new_text=new, edit=edit,
+                blocks=_blocks(instruction, node, new, edit,
+                               instruction.payload_layout),
             ))
 
         elif instruction.op is Op.DELETE_NODE:
             old = node.full_text
+            edit = diff(old, "")
             changes.append(Change(
                 ChangeKind.DELETE, instruction, node=node,
-                old_text=old, new_text="", edit=diff(old, ""),
+                old_text=old, new_text="", edit=edit,
+                blocks=_blocks(instruction, node, "", edit),
             ))
 
         elif instruction.op in (Op.INSERT_NODE, Op.APPEND_NODE):
