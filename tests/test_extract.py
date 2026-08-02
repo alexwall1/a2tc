@@ -86,6 +86,35 @@ def test_lines_survive_a_pdf_without_layout_analysis(monkeypatch):
     assert not any(line.starts_paragraph for line in lines)
 
 
+def test_a_poppler_without_layout_analysis_says_so(monkeypatch):
+    """Degrading quietly would leave the reader with provisions silently run
+    together and no way to know why."""
+    from a2t.extract import pdf as pdf_module
+
+    class Failed:
+        returncode = 99
+        stderr = "Error: Unknown option -bbox-layout"
+        stdout = ""
+
+    monkeypatch.setattr(pdf_module.subprocess, "run", lambda *a, **k: Failed())
+    with pytest.warns(pdf_module.LayoutUnavailable, match="poppler 0.42"):
+        assert pdf_module.paragraph_starts(PDF) == []
+
+
+def test_unreadable_layout_output_says_so(monkeypatch):
+    """A poppler that accepts the flag and answers with something else."""
+    from a2t.extract import pdf as pdf_module
+
+    class Garbage:
+        returncode = 0
+        stderr = ""
+        stdout = "not xml at all"
+
+    monkeypatch.setattr(pdf_module.subprocess, "run", lambda *a, **k: Garbage())
+    with pytest.warns(pdf_module.LayoutUnavailable):
+        assert pdf_module.paragraph_starts(PDF) == []
+
+
 # ------------------------------------------------------------------ operative part
 
 

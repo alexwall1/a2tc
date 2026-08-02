@@ -13,6 +13,12 @@ identifiers, and the consolidated text to amend, retrieved from EUR-Lex.
 - Python 3.11+
 - `pdftotext` (poppler-utils) on the PATH — `sudo apt install poppler-utils`
 
+  Poppler 0.42 or newer, for `pdftotext -bbox-layout`. That is where the paragraph
+  breaks come from: a new subparagraph often carries no number and no indent, so
+  nothing else in the extracted text marks it. An older poppler still works, and
+  says so on every run — the text is all there, but such a subparagraph is printed
+  as part of the provision above it.
+
 ## Install
 
 ```bash

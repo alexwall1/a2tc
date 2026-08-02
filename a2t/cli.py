@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import click
 
 from a2t.detect.targets import detect_targets, find_proposal_date
 from a2t.extract.deboilerplate import operative_part
-from a2t.extract.pdf import ExtractionError, extract_lines
+from a2t.extract.pdf import ExtractionError, LayoutUnavailable, extract_lines
 from a2t.model.assemble import assemble
 from a2t.model.reconcile import reconcile
 from a2t.model.tree import Kind
@@ -18,10 +19,28 @@ from a2t.retrieval.eurlex_builder import DEFAULT_CACHE, EurlexBuilderProvider
 from a2t.retrieval.versions import VersionError, publication_warning, select_version
 
 
+def _echo_warnings() -> None:
+    """Route the extractor's warnings through click, so they read like the rest.
+
+    They travel as warnings rather than return values because every command extracts,
+    and none of them can do anything about it — but the reader of the output needs to
+    know what the document will be missing.
+    """
+    def show(message, category, filename, lineno, file=None, line=None):  # noqa: ARG001
+        if issubclass(category, LayoutUnavailable):
+            click.echo(f"WARNING {message}", err=True)
+        else:
+            click.echo(f"{category.__name__}: {message}", err=True)
+
+    warnings.showwarning = show
+    warnings.simplefilter("once", LayoutUnavailable)
+
+
 @click.group()
 @click.version_option("0.1.0", prog_name="a2t")
 def main() -> None:
     """Convert EU amendment proposals into tracked-changes Word documents."""
+    _echo_warnings()
 
 
 @main.command()

@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import warnings
 from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -127,8 +128,30 @@ def to_lines(text: str) -> list[Line]:
 XHTML = "{http://www.w3.org/1999/xhtml}"
 
 
+class LayoutUnavailable(UserWarning):
+    """Poppler could not report where the paragraphs of a PDF begin."""
+
+
 def _collapse(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _warn_no_layout(detail: str) -> None:
+    """Say what will be missing, rather than losing it quietly.
+
+    Without the layout pass the text still comes out whole, so the run does not fail
+    — but a paragraph break that carries no number and no indent cannot be seen, and
+    the text after it joins the provision above. Worth knowing before reading the
+    result, so it is said out loud.
+    """
+    warnings.warn(
+        f"pdftotext could not report the page layout ({detail or 'no detail given'}). "
+        f"Paragraph breaks that carry no number and no indentation will be missed, "
+        f"and the text after them will be printed as part of the provision above. "
+        f"`pdftotext -bbox-layout` needs poppler 0.42 or newer.",
+        LayoutUnavailable,
+        stacklevel=3,
+    )
 
 
 def paragraph_starts(pdf_path: str | Path) -> list[tuple[str, bool]]:
@@ -150,10 +173,12 @@ def paragraph_starts(pdf_path: str | Path) -> list[tuple[str, bool]]:
         capture_output=True, text=True, encoding="utf-8",
     )
     if proc.returncode != 0:
+        _warn_no_layout(proc.stderr.strip())
         return []
     try:
         root = ET.fromstring(proc.stdout.encode())
-    except Exception:  # noqa: BLE001 — a layout we cannot read is not a failure
+    except ET.XMLSyntaxError as exc:
+        _warn_no_layout(str(exc))
         return []
 
     out: list[tuple[str, bool]] = []
