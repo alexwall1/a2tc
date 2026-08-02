@@ -20,6 +20,7 @@ separates the two cleanly.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 from a2t.detect.targets import ANCHOR
 from a2t.detect.celex import parse_citation
@@ -47,6 +48,12 @@ CONTAINER = re.compile(r"\b(?:is|shall\s+be)\s+(?:hereby\s+)?amended\s+as\s+foll
 
 OPEN_QUOTE = "‘"  # ‘
 CLOSE_QUOTE = "’"  # ’
+QUOTES = (OPEN_QUOTE, CLOSE_QUOTE, "“", '"')
+# What a payload's opening quote may turn out to be. Whatever the drafter typed at
+# that position is the quote — a payload is quoted legislation, so its first
+# character is where its opening quote sits. Point (c) and (d) of Article 1(7) of
+# COM(2026) 616 final open with a plain apostrophe and close with ’.
+OPENERS = QUOTES + ("'",)
 PAYLOAD_RULE = re.compile(r"^\s*_{3,}\s*$")
 
 ROMAN_ONLY = set("ivxl")
@@ -226,7 +233,10 @@ class _Segmenter:
         starts = [
             index for index, line in enumerate(self.lines)
             if not line.blank
-            and line.stripped[:1] not in (OPEN_QUOTE, CLOSE_QUOTE, "\u201c", '"')
+            # Quotes only, never the apostrophe: an instruction with no number of
+            # its own may well open with the phrase it replaces — "'Article 27' is
+            # replaced by 'Articles 27 and 27a'".
+            and line.stripped[:1] not in QUOTES
             and OPERATION.search(line.stripped)
         ]
         for position, index in enumerate(starts):
@@ -274,6 +284,11 @@ class _Segmenter:
         payload_lines = text_lines[consumed:]
         if not payload_lines:
             return
+        if _closes_early(payload_lines):
+            instruction.note(
+                "the payload's quote closes before its text ends — the numbered "
+                "paragraphs below that close are read as part of the payload"
+            )
         (instruction.payload, instruction.footnotes, instruction.payload_layout,
          instruction.payload_breaks) = _extract_payload(payload_lines)
         instruction.payload_lines = (
@@ -283,6 +298,47 @@ class _Segmenter:
 
 PAYLOAD_END = re.compile(rf"{CLOSE_QUOTE}\s*[;.]\s*$")
 
+# A numbered paragraph of the payload, as it opens a line — behind the payload's
+# opening quote where it is the first of them.
+PAYLOAD_NUMBER = re.compile(
+    rf"^[{re.escape(''.join(OPENERS))}]?(?P<key>\d{{1,2}}[a-z]?)\.\s+\S"
+)
+
+
+def _numbers_on(previous: str, key: str) -> bool:
+    """Is `key` the number of the paragraph after `previous` — 7 after 6, 5a after 5?"""
+    if previous.isdigit() and key.isdigit():
+        return int(key) == int(previous) + 1
+    if key[:-1] == previous and key[-1:] == "a":
+        return True
+    if previous[-1:].isalpha() and key[:-1] == previous[:-1]:
+        return key[-1:] == _alpha_successor(previous[-1:])
+    return False
+
+
+def _resumes(lines: list[Line], index: int) -> bool:
+    """Does the payload carry on below the closing quote at `index`?
+
+    "the following paragraph 6 and 7 are added:" — Article 1(7)(e) of COM(2026) 616
+    final — is followed by a payload whose quote closes after paragraph 6, with
+    paragraph 7 standing below it unquoted and carrying the close that was meant to
+    come after both. Cutting at the first close drops paragraph 7 without a trace.
+
+    The payload's own numbering is what says it has not finished: the line below the
+    close opens the paragraph after the last one the payload numbered. Nothing that
+    follows a genuine close does that — a footnote, an ELI line and a page marker
+    continue no sequence.
+    """
+    following = next((line for line in lines[index + 1:] if not line.blank), None)
+    if following is None:
+        return False
+    resumed = PAYLOAD_NUMBER.match(following.stripped)
+    if resumed is None:
+        return False
+    numbered = [PAYLOAD_NUMBER.match(line.stripped) for line in lines[:index + 1]]
+    last = next((m.group("key") for m in reversed(numbered) if m is not None), None)
+    return last is not None and _numbers_on(last, resumed.group("key"))
+
 
 def _truncate_at_close(lines: list[Line]) -> list[Line]:
     """Cut a payload at its closing quote.
@@ -291,11 +347,35 @@ def _truncate_at_close(lines: list[Line]) -> list[Line]:
     a footnote, an ELI line, a page marker — fall inside the quoted legislation.
     A payload ends with the closing quote and the instruction's own punctuation, and
     in well-formed text that appears exactly once, so this is a no-op there.
+
+    A close the payload's own numbering carries on past is a drafting slip and ends
+    nothing; see `_resumes`.
     """
     for index, line in enumerate(lines):
-        if PAYLOAD_END.search(line.stripped):
+        if PAYLOAD_END.search(line.stripped) and not _resumes(lines, index):
             return lines[:index + 1]
     return lines
+
+
+def _drop_early_closes(lines: list[Line]) -> list[Line]:
+    """Take out a closing quote the payload was found to continue past.
+
+    Only the last line of a payload closes it. A close still standing above that one
+    is the slip `_resumes` saw through, and left in it would print as a stray quote
+    in the middle of the legislation — and, worse, would read as the end of a
+    provision when the payload is split into the blocks it is printed as.
+    """
+    return [
+        line if index == len(lines) - 1
+        else replace(line, text=PAYLOAD_END.sub("", line.text))
+        for index, line in enumerate(lines)
+    ]
+
+
+def _closes_early(lines: list[Line]) -> bool:
+    """Did the payload's quote close before its text ended?"""
+    kept = _truncate_at_close(lines)
+    return any(PAYLOAD_END.search(line.stripped) for line in kept[:-1])
 
 
 def _extract_payload(
@@ -308,7 +388,7 @@ def _extract_payload(
     printing the payload as legislation needs the structure that only the layout and
     the line spacing still record. See `a2t.model.payload`.
     """
-    lines = _truncate_at_close(lines)
+    lines = _drop_early_closes(_truncate_at_close(lines))
     rule = next(
         (i for i, line in enumerate(lines) if PAYLOAD_RULE.match(line.text)), None
     )
@@ -319,8 +399,9 @@ def _extract_payload(
     text = " ".join(line.stripped for line in body).strip()
     text = re.sub(r"\s+", " ", text)
 
-    # Drafting slips use the closing quote, or a double quote, as the opener.
-    if text[:1] in (OPEN_QUOTE, CLOSE_QUOTE, "\u201c", '"'):
+    # Drafting slips use the closing quote, a double quote or an apostrophe as the
+    # opener.
+    if text[:1] in OPENERS:
         text = text[1:]
     # Trailing "’;" / "’." / "’" — the closing quote plus the instruction's own
     # punctuation. Quote counting cannot be used: apostrophes share the character.

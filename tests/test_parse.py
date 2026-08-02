@@ -280,6 +280,36 @@ def test_payload_footnotes_split_off(by_id):
     assert "___________" not in instruction.payload
 
 
+def test_payload_opened_with_an_apostrophe_is_still_quoted(by_id):
+    """Art. 1(7)(c) and (d) open their payload with ' and close it with ’."""
+    for ident in ["1.7.c", "1.7.d"]:
+        assert by_id[ident].payload.startswith("No later than"), ident
+
+
+def test_payload_runs_past_a_quote_that_closes_too_early(by_id):
+    """Art. 1(7)(e): "the following paragraph 6 and 7 are added:".
+
+    The quote closes after paragraph 6; paragraph 7 stands below it unquoted and
+    carries the close that was meant to come after both. Cutting at the first close
+    would drop paragraph 7 — 88 words of new law — without a trace.
+    """
+    instruction = by_id["1.7.e"]
+    assert instruction.payload.startswith("6. By 1 January 2032,")
+    assert "7. No later than 30 September 2033," in instruction.payload
+    assert instruction.payload.endswith("submit a legislative proposal to that effect.")
+    # The close it ran past is gone, not left standing mid-payload.
+    assert "’" not in instruction.payload
+    assert any("that close are read as part of the payload" in note
+               for note in instruction.notes)
+
+
+def test_payload_stops_at_the_close_that_does_end_it(by_id):
+    """The repair above must not let a payload run on into what follows it."""
+    assert by_id["1.7.a"].payload.endswith("including double payment.")
+    assert by_id["1.9"].payload.endswith("successively granted for the first time "
+                                         "and withdrawn.")
+
+
 def test_inserted_article_payload_is_whole_article(by_id):
     instruction = by_id["1.5"]
     assert instruction.op is Op.INSERT_NODE
