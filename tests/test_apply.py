@@ -17,7 +17,7 @@ from a2t.extract.deboilerplate import operative_part
 from a2t.extract.pdf import extract_lines
 from a2t.model.assemble import assemble
 from a2t.model.instruction import Instruction, Op
-from a2t.model.payload import Provision, from_node, structure
+from a2t.model.payload import Provision, from_node, opening_number, structure
 from a2t.model.tree import Act, Kind, Node
 from a2t.parse.rules import classify_all
 from a2t.parse.segment import segment
@@ -307,6 +307,32 @@ def test_text_edit_absent_phrase_is_skipped():
     assert "not present" in change.note
 
 
+def test_a_replacement_read_block_by_block_keeps_the_paragraph_number():
+    """The number the act keeps outside a paragraph's words goes on the first block
+    it is printed as — the payload's own source lines cannot carry it."""
+    act = Act(celex="TEST", title="t")
+    paragraph = act.root.add(Node(Kind.ARTICLE, key="9")).add(
+        Node(Kind.PARAGRAPH, key="2")
+    )
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="Member States shall report yearly."))
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="The Commission shall publish them."))
+
+    instr = instruction(
+        Op.REPLACE_NODE,
+        payload="Member States shall report every second year. "
+                "The Commission shall publish them.",
+        payload_layout=["    Member States shall report every second year.",
+                        "    The Commission shall publish them."],
+        payload_breaks=[True, True],
+    )
+    change = build_changes(Resolution(instr, node=paragraph, status="resolved"))[0]
+
+    assert change.old_text.startswith("2. ")
+    assert change.new_text.startswith("2. Member States shall report every second")
+    assert change.blocks[0].new.text.startswith("2. ")
+    assert change.blocks[1].new.text.startswith("The Commission")
+
+
 def test_enumerated_resolution_yields_one_change_per_target():
     act = make_act()
     nodes = act.article("3").of_kind(Kind.POINT)
@@ -409,11 +435,32 @@ def test_new_provisions_are_pure_insertions(corpus):
 
 @pytestmark_corpus
 def test_replacement_text_is_the_payload_verbatim(corpus):
-    """The document must never contain text the pipeline composed."""
+    """The document must never contain text the pipeline composed.
+
+    The one thing a replacement carries beyond its payload is the number of the
+    paragraph it replaces, which the act keeps outside the words on both sides of
+    the change and which the payload usually does not restate.
+    """
     for changeset in corpus.values():
         for change in changeset.renderable:
             if change.kind is ChangeKind.REPLACE:
-                assert change.new_text == change.instruction.payload
+                payload = change.instruction.payload
+                number = opening_number(change.node)
+                assert change.new_text in (payload, number + payload)
+
+
+@pytestmark_corpus
+def test_a_replaced_paragraph_keeps_its_number(corpus):
+    """Art. 1(7)(c): paragraph 4 of Article 3gg, replaced by text that omits "4.".
+
+    Printed as the payload stands, the paragraph would come out unnumbered between
+    paragraphs 3 and 5 — the number struck and nothing put back.
+    """
+    change = next(c for cs in corpus.values() for c in cs.renderable
+                  if c.instruction.id == "1.7.c")
+    assert change.old_text.startswith("4. ")
+    assert change.new_text.startswith("4. No later than 30 September 2035,")
+    assert "4." not in change.edit.deleted_text
 
 
 @pytestmark_corpus

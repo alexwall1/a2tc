@@ -117,21 +117,43 @@ def opening_number(node: Node) -> str:
     return ""
 
 
+# A block that states a number of its own, and so needs none put in front of it.
+NUMBERED_ALREADY = re.compile(r"^\s*(?:\d{1,2}[a-z]?\.|\([0-9a-z]{1,4}\))\s")
+
+
+def with_number(text: str, number: str) -> str:
+    """Text as it is printed under `number`, which the act keeps outside its words.
+
+    Used on both sides of a replacement. On the old side it makes the number part of
+    what is being replaced, so a payload restating it — which is how payloads are
+    drafted — diffs against it instead of striking it and inserting the same digit
+    back. On the new side it puts the number back in front of a payload that does not
+    restate it: Article 3gg(4) of the ETS Directive is replaced by text opening "No
+    later than 30 September 2035", and printed as it stands that paragraph would lose
+    its number, coming out unnumbered between paragraphs 3 and 5.
+
+    Never in front of a marker of its own, which would read "(a) 1. …".
+    """
+    if not number or not text or NUMBERED_ALREADY.match(text):
+        return text
+    return number + text
+
+
+def carry_number(blocks: list[Provision], number: str) -> list[Provision]:
+    """`with_number` applied to the first of the blocks a provision is printed as."""
+    if blocks and blocks[0].key is None:
+        blocks[0] = replace(blocks[0], text=with_number(blocks[0].text, number))
+    return blocks
+
+
 def from_node(node: Node) -> list[Provision]:
     """The blocks a provision already in the act is printed as.
 
     In document order, and carrying the same text in the same pieces as
     `Node.full_text` joins, plus the paragraph number the act keeps outside them.
-    That number is part of the old text so that a replacement restating it — which
-    is how payloads are drafted — diffs against it instead of striking it and
-    inserting the same digit back.
     """
     blocks = [Provision(n.kind, n.key, n.text) for n in node.walk() if n.text]
-    number = opening_number(node)
-    # Never in front of a marker of its own, which would read "(a) 1. …".
-    if number and blocks and blocks[0].key is None:
-        blocks[0].text = number + blocks[0].text
-    return blocks
+    return carry_number(blocks, opening_number(node))
 
 
 # ------------------------------------------------------------------------ layout
@@ -478,4 +500,5 @@ def structure(text: str, layout: Sequence[str] | None = None,
     return _from_flat(text, named)
 
 
-__all__ = ["Provision", "from_node", "printed", "structure"]
+__all__ = ["Provision", "carry_number", "from_node", "printed", "structure",
+           "with_number"]

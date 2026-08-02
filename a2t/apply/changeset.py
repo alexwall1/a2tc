@@ -17,7 +17,14 @@ from enum import Enum
 
 from a2t.apply.diff import Edit, Pair, align, diff
 from a2t.model.instruction import Instruction, Op
-from a2t.model.payload import Provision, from_node, opening_number, structure
+from a2t.model.payload import (
+    Provision,
+    carry_number,
+    from_node,
+    opening_number,
+    structure,
+    with_number,
+)
 from a2t.model.tree import Act, Kind, Node
 from a2t.resolve.resolver import Resolution, ResolutionReport
 
@@ -153,7 +160,7 @@ def split_enumerated_payload(payload: str, keys: list[str]) -> list[str] | None:
 
 def _blocks(instruction: Instruction, node: Node, payload: str, whole: Edit,
             layout: list[str] | None = None,
-            breaks: list[bool] | None = None) -> list[Pair]:
+            breaks: list[bool] | None = None, number: str = "") -> list[Pair]:
     """Resolve a whole-provision change block by block.
 
     Only where doing so tells the reader something. A provision that is a single
@@ -163,7 +170,9 @@ def _blocks(instruction: Instruction, node: Node, payload: str, whole: Edit,
     one, and it is what the change set already holds.
     """
     old = from_node(node)
-    new = structure(payload, layout, breaks) if payload else []
+    # The payload is read from its own source lines, which carry no number, so the
+    # number goes on afterwards — as it does on the old side, and for the same reason.
+    new = carry_number(structure(payload, layout, breaks), number) if payload else []
     # A payload that restates the article's heading is compared against the heading
     # the act already carries, so the two do not both get printed. One that does not
     # restate it leaves the act's heading standing, untouched and outside the change.
@@ -311,15 +320,16 @@ def build_changes(resolution: Resolution,
                     note="one sentence replaced within the provision",
                 ))
                 continue
-            old = opening_number(node) + node.full_text
-            new = instruction.payload or ""
+            number = opening_number(node)
+            old = number + node.full_text
+            new = with_number(instruction.payload or "", number)
             edit = diff(old, new)
             changes.append(Change(
                 ChangeKind.REPLACE, instruction, node=node,
                 old_text=old, new_text=new, edit=edit,
                 blocks=_blocks(instruction, node, new, edit,
                                instruction.payload_layout,
-                               instruction.payload_breaks),
+                               instruction.payload_breaks, number),
             ))
 
         elif instruction.op is Op.DELETE_NODE:
