@@ -52,6 +52,40 @@ def test_extracts_expected_shape(lines):
     assert lines[-1].page == 142
 
 
+def test_paragraph_breaks_are_read_off_the_layout(lines):
+    """`-layout` writes nothing between paragraphs, so a subparagraph that carries
+    neither a number nor an indent leaves no trace in it. Article 3c(6)'s replacement
+    text runs "… support pursuant to Article 25b." and then begins afresh with "The
+    allocation of allowances …" — a break only poppler's layout analysis records."""
+    by_number = {line.lineno: line for line in lines}
+    opener = next(
+        line for line in lines
+        if line.stripped.startswith("The allocation of allowances under this "
+                                    "paragraph may take into account")
+    )
+    assert opener.starts_paragraph
+    assert not by_number[opener.lineno - 1].starts_paragraph  # a wrapped line
+
+
+def test_most_lines_do_not_open_a_paragraph(lines):
+    """A guard against the alignment collapsing and marking everything: paragraphs
+    run to several lines, so openers are a small minority of them."""
+    opening = sum(1 for line in lines if line.starts_paragraph)
+    body = sum(1 for line in lines if not line.blank)
+    assert 0.05 < opening / body < 0.25
+
+
+def test_lines_survive_a_pdf_without_layout_analysis(monkeypatch):
+    """The paragraph pass is an extra: if poppler cannot supply it, the lines are
+    still the lines."""
+    from a2t.extract import pdf as pdf_module
+
+    monkeypatch.setattr(pdf_module, "paragraph_starts", lambda _: [])
+    lines = pdf_module.extract_lines(PDF)
+    assert lines
+    assert not any(line.starts_paragraph for line in lines)
+
+
 # ------------------------------------------------------------------ operative part
 
 

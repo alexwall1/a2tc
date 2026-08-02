@@ -24,6 +24,12 @@ Indentation is trusted only *within* one payload, where it is internally consist
 nesting across instructions still comes from marker sequence (see `a2t.parse.segment`,
 which documents why layout cannot be trusted there).
 
+Some breaks the geometry cannot show at all. A subparagraph regularly begins with no
+number and at the same indent as the wrapped line above it, and then only the source's
+line spacing distinguishes the two — which is why `a2t.extract.pdf` reads poppler's
+layout analysis as well as its text, and why a payload arrives with its breaks
+alongside its lines.
+
 Where the source lines are unavailable the markers in the flat text are used instead.
 That recovers paragraphs and points but not unnumbered subparagraphs, which have no
 marker to find. When neither yields anything the payload is returned whole: a missed
@@ -34,7 +40,7 @@ silently attribute words to the wrong provision.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 from a2t.model.tree import Kind, Node
@@ -131,39 +137,53 @@ def from_node(node: Node) -> list[Provision]:
 # ------------------------------------------------------------------------ layout
 
 
-def _dequote(lines: list[str]) -> list[str]:
+@dataclass(frozen=True)
+class _Src:
+    """One source line of a payload: its text, and whether it opens a paragraph."""
+
+    text: str
+    opens: bool = False
+
+    @property
+    def indent(self) -> int:
+        return len(self.text) - len(self.text.lstrip())
+
+    @property
+    def stripped(self) -> str:
+        return self.text.strip()
+
+
+def _dequote(sources: list[_Src]) -> list[_Src]:
     """Drop the payload's outer quotes without disturbing anyone's indentation."""
-    out = list(lines)
-    out[0] = re.sub(rf"^(\s*)[{OPEN_QUOTES}{CLOSE_QUOTES}]\s?", r"\1", out[0])
-    out[-1] = re.sub(rf"[{CLOSE_QUOTES}]\s*[;.]?\s*$", "", out[-1])
-    return [line for line in out if line.strip()]
+    out = list(sources)
+    first = re.sub(rf"^(\s*)[{OPEN_QUOTES}{CLOSE_QUOTES}]\s?", r"\1", out[0].text)
+    out[0] = replace(out[0], text=first)
+    last = re.sub(rf"[{CLOSE_QUOTES}]\s*[;.]?\s*$", "", out[-1].text)
+    out[-1] = replace(out[-1], text=last)
+    return [src for src in out if src.text.strip()]
 
 
-def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip())
-
-
-def _split_articles(lines: list[str]) -> list[tuple[str | None, list[str]]]:
+def _split_articles(sources: list[_Src]) -> list[tuple[str | None, list[_Src]]]:
     """Cut the payload at its article headings.
 
     "the following Articles are inserted:" is followed by one quoted block holding
     all of them, so a payload may carry several.
     """
-    groups: list[tuple[str | None, list[str]]] = []
-    current: tuple[str | None, list[str]] = (None, [])
-    for line in lines:
-        match = ARTICLE_HEADING.match(line.strip())
+    groups: list[tuple[str | None, list[_Src]]] = []
+    current: tuple[str | None, list[_Src]] = (None, [])
+    for src in sources:
+        match = ARTICLE_HEADING.match(src.stripped)
         if match is not None:
             if current[1] or current[0] is not None:
                 groups.append(current)
             current = (match.group("key"), [])
         else:
-            current[1].append(line)
+            current[1].append(src)
     groups.append(current)
     return [g for g in groups if g[0] is not None or g[1]]
 
 
-def _take_title(lines: list[str], body_indent: int) -> tuple[str | None, list[str]]:
+def _take_title(sources: list[_Src], body_indent: int) -> tuple[str | None, list[_Src]]:
     """An article's title: the centred lines between its number and its body.
 
     Centring means the indent varies with the line's length rather than marking a
@@ -171,16 +191,15 @@ def _take_title(lines: list[str], body_indent: int) -> tuple[str | None, list[st
     title long enough to fill the column clears it by a single space.
     """
     taken: list[str] = []
-    for line in lines:
-        text = line.strip()
-        if _indent(line) <= body_indent:
+    for src in sources:
+        if src.indent <= body_indent:
             break
-        if NUMBERED.match(text) or LETTERED.match(text):
+        if NUMBERED.match(src.stripped) or LETTERED.match(src.stripped):
             break
-        taken.append(text)
+        taken.append(src.stripped)
     if not taken:
-        return None, lines
-    return " ".join(taken), lines[len(taken):]
+        return None, sources
+    return " ".join(taken), sources[len(taken):]
 
 
 @dataclass
@@ -253,13 +272,13 @@ def _leaves_points(levels: list[_Level], indent: int) -> bool:
     return indent + SLACK < levels[0].indent
 
 
-def _body(lines: list[str], body_indent: int) -> list[Provision]:
+def _body(sources: list[_Src], body_indent: int) -> list[Provision]:
     """Numbered paragraphs, their subparagraphs and their points, in reading order."""
     out: list[Provision] = []
     levels: list[_Level] = []  # the open point levels, outermost first
 
-    for line in lines:
-        indent, text = _indent(line), line.strip()
+    for src in sources:
+        indent, text = src.indent, src.stripped
         numbered, lettered = NUMBERED.match(text), LETTERED.match(text)
         at_body = indent <= body_indent + SLACK
 
@@ -291,15 +310,25 @@ def _body(lines: list[str], body_indent: int) -> list[Provision]:
             out.append(Provision(Kind.SUBPARAGRAPH, None, text))
             continue
 
+        # A subparagraph that begins where the one above it ends, with no number and
+        # no indent to say so. Only the source's own line spacing shows the break, and
+        # `a2t.extract.pdf` is what reads it — but line spacing also varies across a
+        # page break and around inline formatting, so a break is taken only where a
+        # sentence has actually ended. Otherwise a wrapped line would become a
+        # provision starting mid-clause.
+        if src.opens and out[-1].text.rstrip().endswith((".", ";", ":")):
+            out.append(Provision(Kind.SUBPARAGRAPH, None, text))
+            continue
+
         # Anything else is the wrapped continuation of the block above it.
         out[-1].text = f"{out[-1].text} {text}".strip()
 
     return out
 
 
-def _from_layout(lines: Sequence[str]) -> list[Provision]:
+def _from_layout(sources: list[_Src]) -> list[Provision]:
     provisions: list[Provision] = []
-    for key, group in _split_articles(_dequote(list(lines))):
+    for key, group in _split_articles(_dequote(sources)):
         if key is not None and not group:
             provisions.append(Provision(Kind.ARTICLE, key))
             continue
@@ -307,13 +336,13 @@ def _from_layout(lines: Sequence[str]) -> list[Provision]:
         if key is not None:
             # A centred title stands clear of everything under it, so the shallowest
             # line in the article is the one to measure it against.
-            title, rest = _take_title(group, min(_indent(l) for l in group))
+            title, rest = _take_title(group, min(src.indent for src in group))
             provisions.append(Provision(Kind.ARTICLE, key, title=title))
         # The body's own left margin is where it starts. Taking the shallowest line
         # instead would let one stray outdented block — proposals contain them —
         # re-level the whole payload, and a numbered paragraph indented past it would
         # read as a point of something.
-        provisions.extend(_body(rest, _indent(rest[0]) if rest else 0))
+        provisions.extend(_body(rest, rest[0].indent if rest else 0))
     return provisions
 
 
@@ -421,11 +450,16 @@ def _from_flat(text: str, named: str | None = None) -> list[Provision]:
 
 
 def structure(text: str, layout: Sequence[str] | None = None,
+              breaks: Sequence[bool] | None = None,
               named: str | None = None) -> list[Provision]:
     """Split a payload into the blocks it should be printed as.
 
-    `layout` is the payload's source lines with their indentation, `named` the article
-    the instruction says it inserts — used only when there is no layout to read.
+    `layout` is the payload's source lines with their indentation and `breaks` says,
+    line for line, which of them open a paragraph in the PDF — the one break a
+    subparagraph gets when it carries neither a number nor an indent of its own.
+    `named` is the article the instruction says it inserts, used only when there is no
+    layout to read.
+
     Returns at least one provision for any non-empty payload, so a caller can always
     render the result instead of special-casing an empty one.
     """
@@ -433,7 +467,12 @@ def structure(text: str, layout: Sequence[str] | None = None,
     if not text:
         return []
     if layout:
-        provisions = _from_layout(layout)
+        opens = list(breaks or ())
+        sources = [
+            _Src(line, opens[index] if index < len(opens) else False)
+            for index, line in enumerate(layout)
+        ]
+        provisions = _from_layout(sources)
         if provisions:
             return provisions
     return _from_flat(text, named)

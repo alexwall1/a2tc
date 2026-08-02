@@ -6,6 +6,10 @@ from its quoted payload.
 
 Every line keeps its provenance (page number and raw line number) so that instructions
 parsed later can be reported against a location a human can find in the source PDF.
+
+What ``-layout`` does not give is where one paragraph ends and the next begins: it
+writes a newline per line and nothing between blocks. A second pass over poppler's own
+layout analysis supplies that, and only that — the text still comes from ``-layout``.
 """
 
 from __future__ import annotations
@@ -13,8 +17,11 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 from pathlib import Path
+
+from lxml import etree as ET
 
 FORM_FEED = "\f"
 
@@ -37,6 +44,10 @@ class Line:
     text: str
     page: int
     lineno: int  # 1-based, matches `pdftotext -layout file.pdf - | grep -n`
+    # Begins a new paragraph in the source. `-layout` writes one newline per line and
+    # none between paragraphs, so a break that is not marked by a number or an indent
+    # is otherwise unrecoverable from the text. See `paragraph_starts`.
+    starts_paragraph: bool = False
 
     @property
     def stripped(self) -> str:
@@ -113,5 +124,70 @@ def to_lines(text: str) -> list[Line]:
     return lines
 
 
+XHTML = "{http://www.w3.org/1999/xhtml}"
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def paragraph_starts(pdf_path: str | Path) -> list[tuple[str, bool]]:
+    """Every line of the PDF, with whether it opens a paragraph.
+
+    `-layout` writes a newline per line and nothing between paragraphs, so a break
+    that carries no number and no indentation leaves no trace in it — and amendment
+    payloads are full of them: a new subparagraph simply starts at the left margin
+    like the wrapped line above it. Line length cannot stand in for the break either,
+    because the text is justified, so a line routinely ends with room to spare.
+
+    `-bbox-layout` runs poppler's own layout analysis and groups lines into blocks
+    using the vertical gaps and font metrics that the flat text throws away. Only the
+    grouping is taken from it; the text itself still comes from `-layout`, whose line
+    numbering everything downstream reports against.
+    """
+    proc = subprocess.run(
+        ["pdftotext", "-bbox-layout", str(pdf_path), "-"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if proc.returncode != 0:
+        return []
+    try:
+        root = ET.fromstring(proc.stdout.encode())
+    except Exception:  # noqa: BLE001 — a layout we cannot read is not a failure
+        return []
+
+    out: list[tuple[str, bool]] = []
+    for block in root.iter(f"{XHTML}block"):
+        for index, line in enumerate(block.iter(f"{XHTML}line")):
+            words = " ".join(w.text or "" for w in line.iter(f"{XHTML}word"))
+            out.append((_collapse(words), index == 0))
+    return out
+
+
+def _mark_paragraphs(lines: list[Line], blocks: list[tuple[str, bool]]) -> list[Line]:
+    """Carry poppler's paragraph boundaries onto the lines we extracted.
+
+    The two passes do not agree line for line — `-bbox-layout` splits a running
+    header into its parts, and a two-column page is read in a different order — so
+    they are aligned rather than zipped, and a line that finds no counterpart simply
+    keeps the default. A missed break prints the text as it is printed today; an
+    invented one would start a provision in the middle of a sentence.
+    """
+    if not blocks:
+        return lines
+    matcher = SequenceMatcher(
+        None, [_collapse(line.text) for line in lines], [text for text, _ in blocks],
+        autojunk=False,
+    )
+    marked = list(lines)
+    for start, block_start, size in matcher.get_matching_blocks():
+        for offset in range(size):
+            if blocks[block_start + offset][1]:
+                line = lines[start + offset]
+                marked[start + offset] = replace(line, starts_paragraph=True)
+    return marked
+
+
 def extract_lines(pdf_path: str | Path) -> list[Line]:
-    return to_lines(extract_text(pdf_path))
+    lines = to_lines(extract_text(pdf_path))
+    return _mark_paragraphs(lines, paragraph_starts(pdf_path))

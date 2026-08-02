@@ -152,7 +152,8 @@ def split_enumerated_payload(payload: str, keys: list[str]) -> list[str] | None:
 
 
 def _blocks(instruction: Instruction, node: Node, payload: str, whole: Edit,
-            layout: list[str] | None = None) -> list[Pair]:
+            layout: list[str] | None = None,
+            breaks: list[bool] | None = None) -> list[Pair]:
     """Resolve a whole-provision change block by block.
 
     Only where doing so tells the reader something. A provision that is a single
@@ -162,7 +163,7 @@ def _blocks(instruction: Instruction, node: Node, payload: str, whole: Edit,
     one, and it is what the change set already holds.
     """
     old = from_node(node)
-    new = structure(payload, layout) if payload else []
+    new = structure(payload, layout, breaks) if payload else []
     # A payload that restates the article's heading is compared against the heading
     # the act already carries, so the two do not both get printed. One that does not
     # restate it leaves the act's heading standing, untouched and outside the change.
@@ -317,7 +318,8 @@ def build_changes(resolution: Resolution,
                 ChangeKind.REPLACE, instruction, node=node,
                 old_text=old, new_text=new, edit=edit,
                 blocks=_blocks(instruction, node, new, edit,
-                               instruction.payload_layout),
+                               instruction.payload_layout,
+                               instruction.payload_breaks),
             ))
 
         elif instruction.op is Op.DELETE_NODE:

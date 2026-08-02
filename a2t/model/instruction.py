@@ -37,6 +37,9 @@ class Instruction:
     # comparison and so cannot be printed with its structure; these can (see
     # `a2t.model.payload`).
     payload_layout: list[str] = field(default_factory=list)
+    # Which of those lines open a paragraph in the PDF. A subparagraph often carries
+    # neither a number nor an indent, and then the line spacing is all there is.
+    payload_breaks: list[bool] = field(default_factory=list)
     find_text: str | None = None  # for REPLACE_TEXT / DELETE_TEXT
     replace_text: str | None = None
     # "after Article 3gaa, the following Article 3gab is inserted" — where the

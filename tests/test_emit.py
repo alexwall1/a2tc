@@ -836,6 +836,40 @@ def test_text_after_a_list_of_points_is_not_part_of_the_last_one():
     assert "Fuels shall" not in provisions[-2].text
 
 
+def test_a_paragraph_break_with_nothing_else_to_show_it_is_honoured():
+    """A subparagraph often begins with no number and at the same indent as the line
+    above. Only the source's line spacing shows the break, which `a2t.extract.pdf`
+    reads off poppler's layout analysis and passes here."""
+    layout = [
+        "     ‘Fuels shall be eligible for support referred to in this paragraph only",
+        "     if they are produced in the EEA, or in a third country to which the",
+        "     Union provides support pursuant to Article 25b.",
+        "     The allocation of allowances under this paragraph may take into account",
+        "     possible support from other schemes.’;",
+    ]
+    breaks = [True, False, False, True, False]
+    provisions = structure(" ".join(l.strip() for l in layout), layout, breaks)
+
+    assert kinds(provisions) == [("subparagraph", None), ("subparagraph", None)]
+    assert provisions[1].text.startswith("The allocation of allowances")
+
+
+def test_a_break_that_falls_mid_sentence_is_not_honoured():
+    """Line spacing also shifts across a page break and around inline formatting, so
+    a break is taken only where a sentence has ended — otherwise a wrapped line would
+    become a provision starting mid-clause."""
+    layout = [
+        "     ‘(c) 100 % of the remaining price differential at airports located in",
+        "         an outermost region, where",
+        "         the physical delivery of the eligible aviation fuel took place;’;",
+    ]
+    breaks = [False, False, True]
+    provisions = structure(" ".join(l.strip() for l in layout), layout, breaks)
+
+    assert kinds(provisions) == [("point", "c")]
+    assert provisions[0].text.endswith("took place;")
+
+
 def test_points_wrapping_flush_keep_their_own_wrapped_lines():
     """Where a payload sets a point's continuation flush with its marker there is no
     outdent to read, and an unmarked line has to stay part of the point it follows —

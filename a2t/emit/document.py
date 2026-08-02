@@ -40,6 +40,7 @@ def _provisions(change: Change) -> list[Provision]:
     return structure(
         change.new_text,
         layout=change.instruction.payload_layout,
+        breaks=change.instruction.payload_breaks,
         named=named.group("key") if named else None,
     )
 

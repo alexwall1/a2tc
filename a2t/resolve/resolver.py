@@ -217,7 +217,8 @@ def _inserted_articles(instruction: Instruction) -> list[str]:
     keys = [
         provision.key
         for provision in structure(instruction.payload or "",
-                                   instruction.payload_layout)
+                                   instruction.payload_layout,
+                                   instruction.payload_breaks)
         if provision.is_article and provision.key
     ]
     if keys:
