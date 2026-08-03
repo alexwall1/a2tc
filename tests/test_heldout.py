@@ -214,3 +214,56 @@ def test_repealed_article_heading_is_struck(directive, tmp_path):
     doc = etree.fromstring(zipfile.ZipFile(result.path).read("word/document.xml"))
     struck = " ".join(t.text or "" for t in doc.iter(f"{W}delText"))
     assert "Article 1" in struck
+
+
+# ------------------------------------------------- replacing several whole articles
+
+
+@needs_cache
+def test_articles_replaced_together_keep_all_their_text(directive):
+    """Art. 1(4): "Articles 2 and 3 are replaced by the following:".
+
+    Cut on the provision numbers, as a payload of several new *paragraphs* is, the
+    markers found are the new Article 3's paragraphs 2. and 3. — so Article 2 took
+    Article 3's second paragraph, Article 3 took its third, and the new Article 2
+    entirely, plus Article 3's first paragraph, were dropped without a word.
+    """
+    _, _, changeset = directive
+    changes = [c for c in changeset.renderable if c.instruction.id == "1.4"]
+    assert [c.node.key for c in changes] == ["2", "3"]
+
+    two, three = changes
+    assert two.new_text.startswith("Article 2")
+    assert "No quota systems and systems of authorisations" in two.new_text
+    # Article 3's paragraphs belong to Article 3.
+    assert "transport information" not in two.new_text
+
+    assert three.new_text.startswith("Article 3")
+    assert "In order to benefit from the support framework" in three.new_text
+    assert "2. The transport information referred to in paragraph 1" in three.new_text
+    assert "3. Transport information recorded pursuant to paragraph 2" in three.new_text
+
+    # Between them the two segments account for the whole payload.
+    payload = changes[0].instruction.payload
+    assert len(two.new_text) + len(three.new_text) >= len(payload) - 2
+
+
+@needs_cache
+def test_an_article_replaced_in_full_states_its_heading_once(directive):
+    """The segment opens with "Article 3"; the act's own heading must not print too."""
+    _, _, changeset = directive
+    three = next(c for c in changeset.renderable
+                 if c.instruction.id == "1.4" and c.node.key == "3")
+    assert any(pair.block.is_article for pair in three.blocks)
+    assert three.blocks[0].block.key == "3"
+
+
+@needs_cache
+def test_the_footnote_of_a_replaced_article_survives_the_split(directive):
+    """The marker sits in the new Article 3's first paragraph — the one that was lost."""
+    _, _, changeset = directive
+    three = next(c for c in changeset.renderable
+                 if c.instruction.id == "1.4" and c.node.key == "3")
+    assert "*" in three.new_text
+    assert three.instruction.footnotes
+    assert "Regulation (EU) 1056/2020" in three.instruction.footnotes[0]

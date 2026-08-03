@@ -10,6 +10,8 @@ from a2t.apply.changeset import (
     _substitute,
     build_changes,
     build_changeset,
+    split_articles_payload,
+    split_enumerated_payload,
 )
 from a2t.apply.diff import Span, align, diff, summarise
 from a2t.detect.targets import detect_targets
@@ -204,6 +206,63 @@ def test_replacement_matching_nothing_keeps_the_whole_diff():
     assert all(p.old is None or p.new is None  # …but nothing pairs block to block
                for p in align(from_node(paragraph), structure(change.new_text)))
     assert change.blocks == []
+
+
+# ------------------------------------------------------- splitting a shared payload
+
+
+def test_payload_split_between_two_paragraphs():
+    """The case the splitter is for: each new paragraph opens with its own number."""
+    payload = "5. The first new paragraph. 5a. The second new paragraph."
+    assert split_enumerated_payload(payload, ["5", "5a"]) == [
+        "5. The first new paragraph.",
+        "5a. The second new paragraph.",
+    ]
+
+
+def test_payload_split_refused_when_a_number_is_missing():
+    assert split_enumerated_payload("5. Only one paragraph here.", ["5", "5a"]) is None
+
+
+def test_payload_split_refused_when_the_numbers_run_backwards():
+    payload = "5a. The later one first. 5. And then the earlier."
+    assert split_enumerated_payload(payload, ["5", "5a"]) is None
+
+
+def test_payload_split_refused_when_text_precedes_the_first_number():
+    """Text above the first marker belongs to no segment, so cutting there loses it.
+
+    This is what "Articles 2 and 3 are replaced by the following:" looks like when the
+    numbers are matched instead of the headings: "2." and "3." are found, but they are
+    the new articles' *paragraphs*, and everything above them goes silently.
+    """
+    payload = ("Article 2 1. The first paragraph, which is lost. "
+               "2. The second. 3. The third.")
+    assert split_enumerated_payload(payload, ["2", "3"]) is None
+
+
+def test_articles_split_at_their_headings():
+    payload = ("Article 2 No quota systems shall apply. "
+               "Article 3 1. In order to benefit, the undertaking shall record.")
+    assert split_articles_payload(payload, ["2", "3"]) == [
+        "Article 2 No quota systems shall apply.",
+        "Article 3 1. In order to benefit, the undertaking shall record.",
+    ]
+
+
+def test_articles_split_refused_when_a_heading_is_missing():
+    payload = "Article 2 No quota systems shall apply. 3. A paragraph, not an article."
+    assert split_articles_payload(payload, ["2", "3"]) is None
+
+
+def test_articles_split_is_not_fooled_by_a_cross_reference():
+    """"as specified in Article 3" is a reference, and it precedes the real heading."""
+    payload = ("Article 2 The rules as specified in Article 3 shall apply. "
+               "Article 3 The rules referred to.")
+    assert split_articles_payload(payload, ["2", "3"]) == [
+        "Article 2 The rules as specified in Article 3 shall apply.",
+        "Article 3 The rules referred to.",
+    ]
 
 
 # -------------------------------------------------------------------- substitution
@@ -477,3 +536,14 @@ def test_most_replacements_stay_word_level(corpus):
                 if c.kind is ChangeKind.REPLACE]
     word = [c for c in replaces if c.edit.mode == "word"]
     assert len(word) / len(replaces) > 0.75
+
+
+def test_articles_split_is_not_fooled_by_a_reference_opening_a_sentence():
+    """"In accordance with Article 3, ..." follows a full stop like a heading does."""
+    payload = ("Article 2 The rules shall apply. In accordance with Article 3, "
+               "Member States shall report. Article 3 The rules referred to.")
+    assert split_articles_payload(payload, ["2", "3"]) == [
+        "Article 2 The rules shall apply. In accordance with Article 3, "
+        "Member States shall report.",
+        "Article 3 The rules referred to.",
+    ]

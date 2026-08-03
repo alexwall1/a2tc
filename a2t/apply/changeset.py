@@ -129,6 +129,34 @@ def _remember(texts: dict[int, str] | None, node: Node, text: str) -> None:
         texts[id(node)] = text
 
 
+def _cut(payload: str, patterns: list[re.Pattern]) -> list[str] | None:
+    """Cut `payload` where each pattern in turn opens the next provision.
+
+    Returns None unless the openings are all present, in order, and the first of them
+    is the start of the payload. Text above the first opening belongs to no segment,
+    so cutting from there would drop it — and in this project a payload that cannot be
+    divided is reported, never guessed at.
+    """
+    positions: list[int] = []
+    cursor = 0
+    for pattern in patterns:
+        match = pattern.search(payload, cursor)
+        if match is None:
+            return None
+        # The patterns allow a leading space so a key cannot match mid-word; the
+        # segment starts at the key itself.
+        positions.append(match.start() if match.start() == 0 else match.start() + 1)
+        cursor = match.end()
+    if positions != sorted(positions) or payload[:positions[0]].strip():
+        return None
+
+    segments = []
+    for index, start in enumerate(positions):
+        end = positions[index + 1] if index + 1 < len(positions) else len(payload)
+        segments.append(payload[start:end].strip())
+    return segments if all(segments) else None
+
+
 def split_enumerated_payload(payload: str, keys: list[str]) -> list[str] | None:
     """Split one payload that carries replacement text for several provisions.
 
@@ -140,27 +168,38 @@ def split_enumerated_payload(payload: str, keys: list[str]) -> list[str] | None:
     Returns None if the markers are not all present in order, in which case the
     caller must report rather than guess.
     """
-    positions: list[int] = []
-    cursor = 0
-    for key in keys:
-        match = re.compile(rf"(?:^|\s){re.escape(key)}\.\s+").search(payload, cursor)
-        if match is None:
-            return None
-        positions.append(match.start() if match.start() == 0 else match.start() + 1)
-        cursor = match.end()
-    if positions != sorted(positions):
-        return None
+    return _cut(
+        payload, [re.compile(rf"(?:^|\s){re.escape(key)}\.\s+") for key in keys]
+    )
 
-    segments = []
-    for index, start in enumerate(positions):
-        end = positions[index + 1] if index + 1 < len(positions) else len(payload)
-        segments.append(payload[start:end].strip())
-    return segments if all(segments) else None
+
+# A heading, as against the many cross-references to other articles that legislation
+# is made of. Two things separate them, and both are needed: a heading opens the
+# payload or follows the end of a sentence — the test `a2t.model.payload` applies to
+# markers, for the same reason — and what comes after it opens a provision rather than
+# continuing a sentence, so never a lowercase word. "as specified in Article 3 shall
+# apply" fails the first; "in accordance with Article 3, Member States" the second.
+def _heading(key: str) -> re.Pattern:
+    return re.compile(
+        rf"(?:^|(?<=[.;:])\s)[Aa]rticle\s+{re.escape(key)}\b(?!\s+[a-z])"
+    )
+
+
+def split_articles_payload(payload: str, keys: list[str]) -> list[str] | None:
+    """Split a payload that carries several whole new articles, at their headings.
+
+    An article is divided from the next by its heading, not by a number in the running
+    text. Cutting "Articles 2 and 3 are replaced by the following:" on the numbers
+    finds the new articles' *paragraphs* 2. and 3. instead — which sit below the first
+    article's paragraph 1, so everything above them, heading included, is lost.
+    """
+    return _cut(payload, [_heading(key) for key in keys])
 
 
 def _blocks(instruction: Instruction, node: Node, payload: str, whole: Edit,
             layout: list[str] | None = None,
-            breaks: list[bool] | None = None, number: str = "") -> list[Pair]:
+            breaks: list[bool] | None = None, number: str = "",
+            named: str | None = None) -> list[Pair]:
     """Resolve a whole-provision change block by block.
 
     Only where doing so tells the reader something. A provision that is a single
@@ -172,7 +211,8 @@ def _blocks(instruction: Instruction, node: Node, payload: str, whole: Edit,
     old = from_node(node)
     # The payload is read from its own source lines, which carry no number, so the
     # number goes on afterwards — as it does on the old side, and for the same reason.
-    new = carry_number(structure(payload, layout, breaks), number) if payload else []
+    new = (carry_number(structure(payload, layout, breaks, named), number)
+           if payload else [])
     # A payload that restates the article's heading is compared against the heading
     # the act already carries, so the two do not both get printed. One that does not
     # restate it leaves the act's heading standing, untouched and outside the change.
@@ -277,7 +317,13 @@ def build_changes(resolution: Resolution,
     if (resolution.enumerated and instruction.op is Op.REPLACE_NODE
             and instruction.payload and len(targets) > 1):
         keys = [node.key or "" for node in targets]
-        segments = split_enumerated_payload(instruction.payload, keys)
+        # Whole articles are divided by their headings; anything smaller by the number
+        # it opens with.
+        segments = (
+            split_articles_payload(instruction.payload, keys)
+            if all(node.kind is Kind.ARTICLE for node in targets)
+            else split_enumerated_payload(instruction.payload, keys)
+        )
         if segments is None:
             instruction.note(
                 f"replaces {len(targets)} provisions but the payload could not be "
@@ -292,10 +338,15 @@ def build_changes(resolution: Resolution,
                     new_text=segment,
                     edit=diff(opening_number(node) + node.full_text, segment),
                     # The layout covers the whole payload, not this one segment of
-                    # it, so the segment's own markers have to do the work.
+                    # it, so the segment's own markers have to do the work — and,
+                    # for a whole article, the heading it opens with, which only
+                    # counts as one when the article it names is the one being
+                    # replaced.
                     blocks=_blocks(instruction, node, segment,
                                    diff(opening_number(node) + node.full_text,
-                                        segment)),
+                                        segment),
+                                   named=node.key
+                                   if node.kind is Kind.ARTICLE else None),
                     note=f"payload split across {len(targets)} provisions",
                 )
                 for node, segment in zip(targets, segments)
