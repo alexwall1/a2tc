@@ -34,7 +34,9 @@ python3 -m venv .venv
 
 You get one `.docx` per amended act, with `w:ins`/`w:del` revisions Word can accept
 or reject individually, plus `out/report.md` accounting for every instruction in the
-proposal and what became of it. Anything the resolver could not place is flagged
+proposal and what became of it. Where a proposal footnotes the text it enacts — a
+new provision citing the regulation it defines a term from — those notes become Word
+footnotes at the foot of the page carrying the provision. Anything the resolver could not place is flagged
 both in the report and as a Word comment at the provision concerned — never dropped
 silently.
 

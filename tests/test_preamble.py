@@ -329,4 +329,4 @@ def test_result_counts_the_preamble(tmp_path):
                            preamble=small_preamble())
     assert result.preamble_paragraphs == 9
     assert result.footnotes == 1
-    assert "of preamble with 1 footnote(s)" in result.summary()
+    assert "9 of preamble, 1 footnote(s)" in result.summary()

@@ -49,6 +49,62 @@ def _provisions(change: Change) -> list[Provision]:
 # Changes that consume the whole provision, so its children must not be rendered too.
 WHOLE_NODE = {ChangeKind.REPLACE, ChangeKind.DELETE}
 
+# "*  Regulation (EU) 2024/1735 of the European Parliament ..." — a footnote the
+# proposal prints below its own quoted payload, under a ``______`` rule. The marker
+# repeats the asterisk for a second and third note on the same payload.
+PAYLOAD_NOTE = re.compile(r"^(?P<marker>\*+)\s*(?P<text>\S.*)$", re.S)
+
+
+class _Notes:
+    """Hands out a payload's own footnotes as their markers are met in its text.
+
+    The segmenter keeps these because they belong to the amendment: a provision being
+    inserted cites its sources, and printing the marker without the note leaves the
+    reader an asterisk pointing at nothing. They are consumed in order — the marker
+    for the second note is "**", so shape alone would match the first one twice.
+    """
+
+    def __init__(self, instruction) -> None:
+        self._pending: list[tuple[str, str]] = []
+        for note in instruction.footnotes:
+            match = PAYLOAD_NOTE.match(note.strip())
+            if match:
+                self._pending.append((match.group("marker"), match.group("text")))
+        self._at = 0
+
+    def __bool__(self) -> bool:
+        return bool(self._pending)
+
+    @property
+    def unplaced(self) -> list[str]:
+        return [marker for marker, _ in self._pending[self._at:]]
+
+    def pieces(self, text: str) -> list[Ins]:
+        """`text` as runs, its markers replaced by references to their footnotes."""
+        out: list[Ins] = []
+        cursor = 0
+        while self._at < len(self._pending):
+            marker, note = self._pending[self._at]
+            # The marker has to be the whole run of asterisks, or "*" would match the
+            # first half of the "**" belonging to the note after it. Drafters set it
+            # bare or in brackets — "of the Council*" and "of the Council (*)" both
+            # appear in one payload of the ETS proposal — and the brackets belong to
+            # the marker, not to the sentence.
+            found = re.compile(
+                r"\s*\(\s*" + re.escape(marker) + r"(?!\*)\s*\)|"
+                + re.escape(marker) + r"(?!\*)"
+            ).search(text, cursor)
+            if found is None:
+                break
+            if found.start() > cursor:
+                out.append(Ins(text[cursor:found.start()]))
+            out.append(Ins(note=note))
+            cursor = found.end()
+            self._at += 1
+        if cursor < len(text):
+            out.append(Ins(text[cursor:]))
+        return out or [Ins(text)]
+
 
 @dataclass
 class EmitResult:
@@ -62,14 +118,14 @@ class EmitResult:
     unrendered: list[Change] = field(default_factory=list)
 
     def summary(self) -> str:
-        preamble = (
-            f", {self.preamble_paragraphs} of preamble"
-            f" with {self.footnotes} footnote(s)" if self.preamble_paragraphs
-            else ""
-        )
+        extra = ""
+        if self.preamble_paragraphs:
+            extra += f", {self.preamble_paragraphs} of preamble"
+        if self.footnotes:
+            extra += f", {self.footnotes} footnote(s)"
         return (
             f"{self.paragraphs} paragraphs, {self.revisions} revised, "
-            f"{self.comments} comment(s){preamble}"
+            f"{self.comments} comment(s){extra}"
         )
 
 
@@ -101,6 +157,7 @@ class DocumentEmitter:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.doc.save(str(path))
         self.result.path = path
+        self.result.footnotes = self.doc.footnote_count
         self.result.unrendered = [
             c for c in self.changeset.renderable if id(c) not in self._seen
         ]
@@ -193,11 +250,6 @@ class DocumentEmitter:
         self.result.paragraphs += written
         self.result.revisions += written
         self.result.preamble_paragraphs = written
-        self.result.footnotes = sum(
-            1 for para in (*source.citations, *source.recitals)
-            for piece in para.pieces
-            if piece.superscript and piece.text in notes
-        )
 
     # ----------------------------------------------------------------- walking
 
@@ -305,20 +357,36 @@ class DocumentEmitter:
         # sides of this edit, so that a payload restating it diffs against it rather
         # than replacing it with itself. Adding it again here would print it twice.
         self._take_number()
+        notes = _Notes(change.instruction)
 
         if not change.blocks:
             mark = "del" if change.kind is ChangeKind.DELETE else None
             block = self.doc.from_spans(change.edit.spans, style=self._style(node),
-                                        paragraph_mark=mark)
+                                        paragraph_mark=mark,
+                                        notes=notes.pieces if notes else None)
             self._account(change, block)
+            self._note_unplaced(change, notes)
             return
 
-        written = [block for pair in change.blocks for block in self._aligned(pair)]
+        # One consumer across every block of the change: the marker may fall in any of
+        # them, and the notes are numbered by the order they are met.
+        written = [
+            block for pair in change.blocks for block in self._aligned(pair, notes)
+        ]
         # `_account` counts the last one.
         self.result.paragraphs += len(written) - 1
         self._account(change, written[0])
+        self._note_unplaced(change, notes)
 
-    def _aligned(self, pair: Pair) -> list:
+    def _note_unplaced(self, change: Change, notes: _Notes) -> None:
+        """A footnote whose marker never turned up is reported, not dropped."""
+        if notes.unplaced:
+            change.note = "; ".join(filter(None, [
+                change.note,
+                f"{len(notes.unplaced)} payload footnote(s) had no marker in the text",
+            ]))
+
+    def _aligned(self, pair: Pair, notes: _Notes | None = None) -> list:
         """The Word paragraphs one step of an alignment is written as.
 
         A block present on only one side is wholly inserted or wholly deleted, and its
@@ -328,12 +396,13 @@ class DocumentEmitter:
         mark = "ins" if pair.old is None else "del" if pair.new is None else None
         block = pair.block
         style = "OJ Article" if block.is_article else self._style(block)
+        take = notes.pieces if notes else None
         written = [self.doc.from_spans(pair.edit.spans, style=style,
-                                       paragraph_mark=mark)]
+                                       paragraph_mark=mark, notes=take)]
         if pair.title is not None:
             written.append(self.doc.from_spans(pair.title.spans,
                                                style="OJ Article Title",
-                                               paragraph_mark=mark))
+                                               paragraph_mark=mark, notes=take))
         return written
 
     def _insertions_for(self, node: Node) -> None:
@@ -343,16 +412,19 @@ class DocumentEmitter:
             # An insertion arrives as one flat payload. Written whole it would sit in
             # the body text as a single justified block — article headings out of the
             # run of centred headings, numbered paragraphs and points run together.
+            notes = _Notes(change.instruction)
             blocks = [
-                self.doc.inserted(text, style=style)
+                self.doc.inserted_pieces(notes.pieces(text), style=style)
                 for text, style in self._printed(_provisions(change), node)
             ]
             if not blocks:
-                blocks = [self.doc.inserted(change.new_text,
-                                            style=self._style(node))]
+                blocks = [self.doc.inserted_pieces(
+                    notes.pieces(change.new_text), style=self._style(node)
+                )]
             # `_account` counts the last one.
             self.result.paragraphs += len(blocks) - 1
             self._account(change, blocks[0])
+            self._note_unplaced(change, notes)
 
     def _printed(self, provisions: list[Provision],
                  anchor: Node) -> list[tuple[str, str]]:

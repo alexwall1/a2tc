@@ -272,6 +272,10 @@ class TrackedDocx:
         self._footnotes = part.element
         return self._footnotes
 
+    @property
+    def footnote_count(self) -> int:
+        return self._footnote_id
+
     def add_footnote(self, text: str, inserted: bool = False) -> int:
         """Add a footnote carrying `text`, returning the id a reference points at.
 
@@ -404,16 +408,32 @@ class TrackedDocx:
         return Block(p, runs, "word")
 
     def from_spans(self, spans, style: str | None = None,
-                   paragraph_mark: str | None = None) -> Block:
+                   paragraph_mark: str | None = None, notes=None) -> Block:
         """Render a pre-computed edit script (Phase 7) as tracked changes.
 
         Diffing happens once, in `a2t.apply.diff`, so what the document shows is
         exactly what the change set says — the two can never drift apart.
+
+        `notes` turns the footnote markers an inserted payload carries into real
+        footnotes. Only inserted spans are offered to it: a marker is something the
+        amendment brings with it, and text being deleted never had one.
         """
         p = self.doc.add_paragraph(style=style)
         runs = []
         for span in spans:
             if not span.text:
+                continue
+            if span.op == "insert" and notes is not None:
+                for piece in notes(span.text):
+                    if piece.note is not None:
+                        run = self._reference(
+                            p, self.add_footnote(piece.note, inserted=True)
+                        )
+                    elif piece.text:
+                        run = self._run(p, piece.text)
+                    else:
+                        continue
+                    runs.append(self._revise(run, "ins"))
                 continue
             run = self._run(p, span.text)
             if span.op == "delete":

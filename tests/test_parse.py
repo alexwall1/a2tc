@@ -280,6 +280,45 @@ def test_payload_footnotes_split_off(by_id):
     assert "___________" not in instruction.payload
 
 
+def test_every_payload_marker_has_a_footnote(by_id):
+    """A marker in the text and no note behind it prints an asterisk pointing at air."""
+    for instruction in by_id.values():
+        markers = re.findall(r"\*+", instruction.payload or "")
+        assert len(markers) == len(instruction.footnotes), instruction.id
+
+
+def test_a_second_payload_footnote_is_its_own_note(by_id):
+    """Art. 1(3)(a) carries "*" and "**"; joined, the two read as one source."""
+    instruction = by_id["1.3.a"]
+    assert len(instruction.footnotes) == 2
+    assert instruction.footnotes[0].startswith("*")
+    assert "Regulation (EU) 2023/2405" in instruction.footnotes[0]
+    assert instruction.footnotes[1].startswith("**")
+    assert "Directive (EU) 2018/2001" in instruction.footnotes[1]
+
+
+def test_footnotes_reusing_one_marker_stay_separate(by_id):
+    """Art. 1(2)(g) marks both of its notes "*" — only the line each opens tells them
+    apart."""
+    instruction = by_id["1.2.g"]
+    assert len(instruction.footnotes) == 2
+    assert "Directive 2008/98/EC" in instruction.footnotes[0]
+    assert "Directive (EU) 2024/1788" in instruction.footnotes[1]
+
+
+def test_a_payload_is_not_cut_above_its_own_footnotes(by_id):
+    """Art. 1(2)(g) closes its quote, then rules off and cites its sources.
+
+    Cutting at that first close took the whole footnote block with it.
+    """
+    instruction = by_id["1.2.g"]
+    assert instruction.footnotes
+    assert "‘offshore worksite’" in instruction.payload  # the text still ends there
+    # The notes are the payload's, not the legislation's.
+    assert "repealing certain Directives" not in instruction.payload
+    assert "repealing certain Directives" in instruction.footnotes[0]
+
+
 def test_payload_opened_with_an_apostrophe_is_still_quoted(by_id):
     """Art. 1(7)(c) and (d) open their payload with ' and close it with ’."""
     for ident in ["1.7.c", "1.7.d"]:

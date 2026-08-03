@@ -56,6 +56,10 @@ QUOTES = (OPEN_QUOTE, CLOSE_QUOTE, "“", '"')
 OPENERS = QUOTES + ("'",)
 PAYLOAD_RULE = re.compile(r"^\s*_{3,}\s*$")
 
+# "* Directive 2008/98/EC …" / "** Regulation (EU) 2018/2001 …" — a payload footnote
+# opening its own line, below the rule.
+FOOTNOTE_MARK = re.compile(r"^\*+\s")
+
 ROMAN_ONLY = set("ivxl")
 ROMAN_SEQUENCE = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
                   "xi", "xii", "xiii", "xiv", "xv"]
@@ -349,12 +353,45 @@ def _truncate_at_close(lines: list[Line]) -> list[Line]:
     in well-formed text that appears exactly once, so this is a no-op there.
 
     A close the payload's own numbering carries on past is a drafting slip and ends
-    nothing; see `_resumes`.
+    nothing; see `_resumes`. Neither does one the payload's own footnote rule follows:
+    the notes below that rule are quoted with the provision they belong to, and cutting
+    above them takes the sources of the legislation being enacted with them.
     """
     for index, line in enumerate(lines):
-        if PAYLOAD_END.search(line.stripped) and not _resumes(lines, index):
-            return lines[:index + 1]
+        if not PAYLOAD_END.search(line.stripped):
+            continue
+        if _resumes(lines, index) or _notes_follow(lines, index):
+            continue
+        return lines[:index + 1]
     return lines
+
+
+def _notes_follow(lines: list[Line], index: int) -> bool:
+    """Is the next thing after this close the payload's own footnotes?"""
+    following = next((line for line in lines[index + 1:] if not line.blank), None)
+    if following is None:
+        return False
+    return bool(PAYLOAD_RULE.match(following.text)
+                or FOOTNOTE_MARK.match(following.stripped))
+
+
+def _notes_start(lines: list[Line]) -> int | None:
+    """Where a payload's footnote block begins, if it has one.
+
+    Usually a ``___________`` rule introduces it. The held-out proposal writes the
+    notes straight after the text with no rule at all, so the marker has to serve as
+    well: a line *opening* with an asterisk is a note, since a marker inside the
+    legislation is always glued to the word it follows ("… of the Council*") and never
+    stands at the head of a line.
+    """
+    rule = next(
+        (i for i, line in enumerate(lines) if PAYLOAD_RULE.match(line.text)), None
+    )
+    if rule is not None:
+        return rule
+    return next(
+        (i for i, line in enumerate(lines) if FOOTNOTE_MARK.match(line.stripped)), None
+    )
 
 
 def _drop_early_closes(lines: list[Line]) -> list[Line]:
@@ -389,12 +426,13 @@ def _extract_payload(
     the line spacing still record. See `a2t.model.payload`.
     """
     lines = _drop_early_closes(_truncate_at_close(lines))
-    rule = next(
-        (i for i, line in enumerate(lines) if PAYLOAD_RULE.match(line.text)), None
-    )
-    body, footnote_lines = (
-        (lines[:rule], lines[rule + 1:]) if rule is not None else (lines, [])
-    )
+    start = _notes_start(lines)
+    if start is None:
+        body, footnote_lines = lines, []
+    else:
+        # The rule is not part of a note; a marker line is the first line of one.
+        opens = PAYLOAD_RULE.match(lines[start].text) is not None
+        body, footnote_lines = lines[:start], lines[start + (1 if opens else 0):]
 
     text = " ".join(line.stripped for line in body).strip()
     text = re.sub(r"\s+", " ", text)
@@ -407,11 +445,22 @@ def _extract_payload(
     # punctuation. Quote counting cannot be used: apostrophes share the character.
     text = re.sub(rf"[{CLOSE_QUOTE}\u201d]\s*[;.]?\s*$", "", text).strip()
 
+    # Each note opens on a line of its own, with its marker. Splitting the block after
+    # joining it cannot see that: the second note's marker is "**", and a rule looking
+    # for whitespace before an asterisk finds no boundary inside "…/oj). ** Directive",
+    # so the two notes come back glued into one. Drafters also reuse "*" for every note
+    # on a payload, which leaves the marker no way to tell them apart at all — the line
+    # each one starts on does.
     footnotes: list[str] = []
-    if footnote_lines:
-        joined = " ".join(line.stripped for line in footnote_lines)
-        joined = re.sub(rf"{CLOSE_QUOTE}\s*[;.]?\s*$", "", joined).strip()
-        footnotes = [f for f in re.split(r"\s(?=\*\s)", joined) if f.strip()]
+    for line in footnote_lines:
+        if FOOTNOTE_MARK.match(line.stripped):
+            footnotes.append(line.stripped)
+        elif footnotes and line.stripped:
+            footnotes[-1] += " " + line.stripped
+    if footnotes:
+        footnotes[-1] = re.sub(
+            rf"{CLOSE_QUOTE}\s*[;.]?\s*$", "", footnotes[-1]
+        ).strip()
     return (text, footnotes, [line.text for line in body],
             [line.starts_paragraph for line in body])
 
