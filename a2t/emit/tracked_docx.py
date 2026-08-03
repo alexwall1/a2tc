@@ -24,8 +24,13 @@ from typing import Any
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH as ALIGN
+from docx.opc.constants import CONTENT_TYPE as CT
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.opc.packuri import PackURI
+from docx.opc.part import XmlPart
 from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
+from docx.oxml.ns import nsmap, qn
+from docx.oxml.parser import parse_xml
 from docx.shared import Cm, Pt
 
 from a2t.textdiff import similarity, tokenize  # noqa: F401  (re-exported)
@@ -66,13 +71,45 @@ OJ_STYLES = {
     "OJ Proposal Note": (10, False, False, ALIGN.CENTER,    0, 18, 0.0),
     "OJ Formula":       (10, False, False, ALIGN.LEFT,     0, 10, 0.0),
     "OJ Recital":       (10, False, False, ALIGN.JUSTIFY,  0,  8, 1.25),
-    "OJ Footnote":      (8,  False, False, ALIGN.LEFT,     0,  2, 1.25),
+    # Word's own names for the footnote apparatus, so the notes are set the way a
+    # reader's Word sets them.
+    "Footnote Text":    (8,  False, False, ALIGN.JUSTIFY,  0,  2, 0.0),
 }
 
 # Styles whose first line hangs back into the left indent, in cm. A recital's number
 # stands in the margin beside its text rather than running into it, which is what makes
 # a page of them readable at a glance.
-OJ_HANGING = {"OJ Recital": 1.25, "OJ Footnote": 1.25}
+OJ_HANGING = {"OJ Recital": 1.25}
+
+
+# A footnotes part has to exist before a reference can point into it, and Word wants the
+# two separator entries even when the document defines no footnotes of its own: they are
+# the rule drawn above the notes and its continuation on an overflowing page.
+FOOTNOTES_XML = (
+    '<w:footnotes xmlns:w="%s">'
+    '<w:footnote w:type="separator" w:id="-1"><w:p><w:pPr>'
+    '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+    '<w:r><w:separator/></w:r></w:p></w:footnote>'
+    '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr>'
+    '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+    '<w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+    "</w:footnotes>"
+) % nsmap["w"]
+
+FOOTNOTES_PARTNAME = "/word/footnotes.xml"
+
+
+@dataclass(frozen=True)
+class Ins:
+    """One run of an inserted paragraph.
+
+    `note` turns the run into a reference to a footnote carrying that text, which Word
+    numbers itself and prints at the foot of whichever page the reference lands on.
+    """
+
+    text: str = ""
+    superscript: bool = False
+    note: str | None = None
 
 
 @dataclass
@@ -109,6 +146,8 @@ class TrackedDocx:
         stamp = date or _dt.datetime.now(_dt.timezone.utc)
         self.date = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
         self._id = 0
+        self._footnotes = None
+        self._footnote_id = 0
         self._install_styles()
 
     # ---------------------------------------------------------------- internals
@@ -154,6 +193,13 @@ class TrackedDocx:
                 style.paragraph_format.tab_stops.add_tab_stop(Cm(hanging))
             # Headings belong with what they head.
             style.paragraph_format.keep_with_next = align is ALIGN.CENTER
+
+        # The reference itself is a character style, because it marks a few digits
+        # inside a paragraph rather than the paragraph.
+        reference = self.doc.styles.add_style(
+            "Footnote Reference", WD_STYLE_TYPE.CHARACTER
+        )
+        reference.font.superscript = True
 
     def _next_id(self) -> str:
         self._id += 1
@@ -202,6 +248,91 @@ class TrackedDocx:
         self._revision_attrs(marker)
         rPr.insert(0, marker)
 
+    # ---------------------------------------------------------------- footnotes
+
+    def _footnotes_element(self):
+        """The document's footnotes part, created on first use.
+
+        `python-docx` has no footnote API — as it has none for revisions — so the part
+        is built and related here. Everything the format needs is already in the
+        library: the content type, the relationship type, and an XML part that
+        serialises itself into the package like any other.
+        """
+        if self._footnotes is not None:
+            return self._footnotes
+        document = self.doc.part
+        try:
+            part = document.part_related_by(RT.FOOTNOTES)
+        except KeyError:
+            part = XmlPart(
+                PackURI(FOOTNOTES_PARTNAME), CT.WML_FOOTNOTES,
+                parse_xml(FOOTNOTES_XML.encode()), document.package,
+            )
+            document.relate_to(part, RT.FOOTNOTES)
+        self._footnotes = part.element
+        return self._footnotes
+
+    def add_footnote(self, text: str, inserted: bool = False) -> int:
+        """Add a footnote carrying `text`, returning the id a reference points at.
+
+        Word numbers footnotes itself, by the order their references appear in the
+        body — so a reference added later on an earlier page renumbers the rest, and
+        the numbering cannot drift out of step with the text the way a hand-written
+        one could.
+        """
+        footnotes = self._footnotes_element()
+        self._footnote_id += 1
+
+        note = OxmlElement("w:footnote")
+        note.set(qn("w:id"), str(self._footnote_id))
+        paragraph = OxmlElement("w:p")
+        pPr = OxmlElement("w:pPr")
+        style = OxmlElement("w:pStyle")
+        style.set(qn("w:val"), "FootnoteText")
+        pPr.append(style)
+        paragraph.append(pPr)
+
+        mark = OxmlElement("w:r")
+        mark_pr = OxmlElement("w:rPr")
+        mark_style = OxmlElement("w:rStyle")
+        mark_style.set(qn("w:val"), "FootnoteReference")
+        mark_pr.append(mark_style)
+        mark.append(mark_pr)
+        mark.append(OxmlElement("w:footnoteRef"))
+
+        body = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.text = f"\t{text}"
+        t.set(XML_SPACE, "preserve")
+        body.append(t)
+
+        if inserted:
+            # The note travels with its reference: rejecting the insertion takes both.
+            for run in (mark, body):
+                wrapper = OxmlElement("w:ins")
+                self._revision_attrs(wrapper)
+                wrapper.append(run)
+                paragraph.append(wrapper)
+        else:
+            paragraph.append(mark)
+            paragraph.append(body)
+
+        note.append(paragraph)
+        footnotes.append(note)
+        return self._footnote_id
+
+    def _reference(self, paragraph, note_id: int):
+        """A run referring to footnote `note_id`."""
+        run = paragraph.add_run()
+        rPr = run._r.get_or_add_rPr()
+        style = OxmlElement("w:rStyle")
+        style.set(qn("w:val"), "FootnoteReference")
+        rPr.append(style)
+        reference = OxmlElement("w:footnoteReference")
+        reference.set(qn("w:id"), str(note_id))
+        run._r.append(reference)
+        return run
+
     # ------------------------------------------------------------------- public
 
     def unchanged(self, text: str, style: str | None = None) -> Block:
@@ -210,25 +341,27 @@ class TrackedDocx:
 
     def inserted(self, text: str, style: str | None = None) -> Block:
         """A wholly new paragraph."""
-        return self.inserted_pieces([(text, False)], style)
+        return self.inserted_pieces([Ins(text)], style)
 
     def inserted_pieces(self, pieces, style: str | None = None) -> Block:
-        """A wholly new paragraph built from ``(text, superscript)`` pairs.
+        """A wholly new paragraph built from `Ins` runs.
 
         Superscript is set on the run rather than in the style, because it applies to
-        part of a paragraph — a footnote reference — and there is nowhere else to put
-        it. That is safe here in a way it would not be for a deletion: accepting an
-        insertion keeps the run and the formatting on it, and rejecting one takes both
-        away together.
+        part of a paragraph and there is nowhere else to put it. That is safe here in a
+        way it would not be for a deletion: accepting an insertion keeps the run and the
+        formatting on it, and rejecting one takes both away together.
         """
         p = self.doc.add_paragraph(style=style)
         runs = []
-        for text, superscript in pieces:
-            if not text:
+        for piece in pieces:
+            if piece.note is not None:
+                run = self._reference(p, self.add_footnote(piece.note, inserted=True))
+            elif piece.text:
+                run = self._run(p, piece.text)
+                if piece.superscript:
+                    run.font.superscript = True
+            else:
                 continue
-            run = self._run(p, text)
-            if superscript:
-                run.font.superscript = True
             runs.append(self._revise(run, "ins"))
         self._mark_paragraph(p, "ins")
         return Block(p, runs, "inserted")

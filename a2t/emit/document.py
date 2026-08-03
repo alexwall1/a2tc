@@ -17,7 +17,7 @@ from pathlib import Path
 
 from a2t.apply.changeset import Change, ChangeKind, ChangeSet
 from a2t.apply.diff import Pair, Span, diff
-from a2t.emit.tracked_docx import TrackedDocx
+from a2t.emit.tracked_docx import Ins, TrackedDocx
 from a2t.extract.preamble import Preamble
 from a2t.model.payload import Provision, printed, structure
 from a2t.model.tree import Act, Kind, Node
@@ -57,12 +57,14 @@ class EmitResult:
     revisions: int = 0
     comments: int = 0
     preamble_paragraphs: int = 0
+    footnotes: int = 0
     rendered: list[Change] = field(default_factory=list)
     unrendered: list[Change] = field(default_factory=list)
 
     def summary(self) -> str:
         preamble = (
-            f", {self.preamble_paragraphs} of preamble" if self.preamble_paragraphs
+            f", {self.preamble_paragraphs} of preamble"
+            f" with {self.footnotes} footnote(s)" if self.preamble_paragraphs
             else ""
         )
         return (
@@ -144,6 +146,7 @@ class DocumentEmitter:
         if source is None:
             return
 
+        notes = dict(source.footnotes)
         written = 0
 
         def write(pieces, style: str) -> None:
@@ -151,8 +154,22 @@ class DocumentEmitter:
             self.doc.inserted_pieces(pieces, style=style)
             written += 1
 
+        def runs(para) -> list[Ins]:
+            """A parsed paragraph's pieces, with its references turned into footnotes.
+
+            A reference whose text was never found stays a plain superscript digit: it
+            is what the proposal shows, and an empty footnote would say less than the
+            number on its own.
+            """
+            return [
+                Ins(note=notes[piece.text])
+                if piece.superscript and piece.text in notes
+                else Ins(piece.text, superscript=piece.superscript)
+                for piece in para.pieces
+            ]
+
         if source.procedure:
-            write([(source.procedure, False)], "OJ Procedure")
+            write([Ins(source.procedure)], "OJ Procedure")
         for index, para in enumerate(source.title):
             # "Proposal for a", then the act's designation, then what it amends.
             # "(Text with EEA relevance)" closes the block, set plain rather than
@@ -161,32 +178,26 @@ class DocumentEmitter:
                      "OJ Proposal Title" if index == 1 else
                      "OJ Proposal Note" if para.text.startswith("(") else
                      "OJ Proposal Subtitle")
-            write([(p.text, p.superscript) for p in para.pieces], style)
+            write(runs(para), style)
         if source.institutions:
-            write([(source.institutions, False)], "OJ Formula")
+            write([Ins(source.institutions)], "OJ Formula")
         for para in source.citations:
-            write([(p.text, p.superscript) for p in para.pieces], "OJ Formula")
-        write([(source.whereas, False)], "OJ Formula")
+            write(runs(para), "OJ Formula")
+        write([Ins(source.whereas)], "OJ Formula")
 
         for recital in source.recitals:
-            pieces = [(f"({recital.number})", False), ("\t", False)]
-            pieces += [(p.text, p.superscript) for p in recital.pieces]
-            write(pieces, "OJ Recital")
+            write([Ins(f"({recital.number})"), Ins("\t"), *runs(recital)], "OJ Recital")
 
-        if source.footnotes:
-            # The proposal prints these at the foot of the page that cites them. A Word
-            # document is not paginated the same way and `python-docx` cannot write the
-            # footnote part, so they are gathered here, below the text that refers to
-            # them and above the articles.
-            write([("_" * 24, False)], "OJ Footnote")
-            for number, text in source.footnotes:
-                write([(number, True), ("\t", False), (text, False)], "OJ Footnote")
-
-        write([(source.enacting, False)], "OJ Formula")
+        write([Ins(source.enacting)], "OJ Formula")
 
         self.result.paragraphs += written
         self.result.revisions += written
         self.result.preamble_paragraphs = written
+        self.result.footnotes = sum(
+            1 for para in (*source.citations, *source.recitals)
+            for piece in para.pieces
+            if piece.superscript and piece.text in notes
+        )
 
     # ----------------------------------------------------------------- walking
 

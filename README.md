@@ -89,9 +89,10 @@ context for the amendments, not as one of them, and `report.md` says so.
 
 Footnote references are read from the page geometry rather than the text, because
 `pdftotext` renders a superscript as a digit run against the word before it and there
-is no way to tell "Agreement³" from "CO2" by shape. Their texts are gathered below the
-recitals rather than at the foot of each page: a Word document is not paginated the way
-the PDF is, and `python-docx` cannot write the footnote part.
+is no way to tell "Agreement³" from "CO2" by shape. They become real Word footnotes,
+printed at the foot of the page that cites them and numbered by Word itself, so the
+numbering cannot drift out of step with the text. Rejecting the insertion takes the
+note with the reference.
 
 ## Other commands
 

@@ -253,19 +253,18 @@ def test_preamble_order(tmp_path):
         "OJFormula", "OJFormula", "OJFormula",  # institutions, citation, Whereas:
     ]
     assert order[8:10] == ["OJRecital", "OJRecital"]
-    assert order[10:12] == ["OJFootnote", "OJFootnote"]  # rule, then the note
-    assert order[12] == "OJFormula"  # HAVE ADOPTED THIS DIRECTIVE:
-    assert order[13] == "OJArticle"
+    assert order[10] == "OJFormula"  # HAVE ADOPTED THIS DIRECTIVE:
+    assert order[11] == "OJArticle"
 
 
 def test_every_preamble_paragraph_is_an_insertion(tmp_path):
     doc = emit(tmp_path, small_preamble())
     paragraphs = list(doc.iter(f"{W}p"))
     # Everything from the procedure number to the enacting formula inclusive.
-    for p in paragraphs[2:13]:
+    for p in paragraphs[2:11]:
         assert p.findall(f"{W}ins"), etree.tostring(p)[:200]
         assert p.find(f"{W}pPr/{W}rPr/{W}ins") is not None
-    assert not paragraphs[13].findall(f"{W}ins")  # the article is untouched
+    assert not paragraphs[11].findall(f"{W}ins")  # the article is untouched
 
 
 def test_recital_number_is_written_with_a_tab(tmp_path):
@@ -279,18 +278,55 @@ def test_recital_number_is_written_with_a_tab(tmp_path):
     assert recital.findall(f".//{W}tab")
 
 
-def test_reference_is_superscript_and_inserted(tmp_path):
-    doc = emit(tmp_path, small_preamble())
-    marks = doc.findall(f".//{W}vertAlign")
-    assert [m.get(f"{W}val") for m in marks] == ["superscript", "superscript"]
-    for mark in marks:
-        run = mark.getparent().getparent()
-        assert run.getparent().tag == f"{W}ins"
+def package(tmp_path, front) -> zipfile.ZipFile:
+    act = make_act()
+    path = emit_document(act, ChangeSet(act), tmp_path / "out.docx",
+                         preamble=front).path
+    return zipfile.ZipFile(path)
+
+
+def test_a_reference_becomes_a_real_word_footnote(tmp_path):
+    """Not a superscript digit and a list at the end — the footnote part itself."""
+    zf = package(tmp_path, small_preamble())
+    assert "word/footnotes.xml" in zf.namelist()
+    assert "footnotes+xml" in zf.read("[Content_Types].xml").decode()
+    assert "/footnotes" in zf.read("word/_rels/document.xml.rels").decode()
+
+    notes = etree.fromstring(zf.read("word/footnotes.xml"))
+    real = [n for n in notes.findall(f"{W}footnote") if n.get(f"{W}type") is None]
+    assert len(real) == 1
+    assert "OJ L 282, 19.10.2016, p. 4." in "".join(
+        t.text or "" for t in real[0].iter(f"{W}t")
+    )
+    # Word draws the rule above the notes from these; without them it complains.
+    kinds = {n.get(f"{W}type") for n in notes.findall(f"{W}footnote")}
+    assert {"separator", "continuationSeparator"} <= kinds
+
+
+def test_the_reference_is_itself_an_insertion(tmp_path):
+    """Rejecting the preamble has to take its footnotes with it."""
+    doc = etree.fromstring(package(tmp_path, small_preamble()).read("word/document.xml"))
+    references = doc.findall(f".//{W}footnoteReference")
+    assert len(references) == 1
+    run = references[0].getparent()
+    assert run.getparent().tag == f"{W}ins"
+
+
+def test_a_reference_without_text_stays_a_superscript_digit(tmp_path):
+    """An empty footnote would say less than the number the proposal prints."""
+    front = small_preamble()
+    front.footnotes = ()
+    zf = package(tmp_path, front)
+    assert "word/footnotes.xml" not in zf.namelist()
+    doc = etree.fromstring(zf.read("word/document.xml"))
+    assert not doc.findall(f".//{W}footnoteReference")
+    assert [m.get(f"{W}val") for m in doc.findall(f".//{W}vertAlign")] == ["superscript"]
 
 
 def test_result_counts_the_preamble(tmp_path):
     act = make_act()
     result = emit_document(act, ChangeSet(act), tmp_path / "out.docx",
                            preamble=small_preamble())
-    assert result.preamble_paragraphs == 11
-    assert "of preamble" in result.summary()
+    assert result.preamble_paragraphs == 9
+    assert result.footnotes == 1
+    assert "of preamble with 1 footnote(s)" in result.summary()
