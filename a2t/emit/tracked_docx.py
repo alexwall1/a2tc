@@ -55,7 +55,24 @@ OJ_STYLES = {
     "OJ Point":         (10, False, False, ALIGN.JUSTIFY,  0,  6, 1.0),
     "OJ Subpoint":      (10, False, False, ALIGN.JUSTIFY,  0,  6, 2.0),
     "OJ Heading":       (10, True,  False, ALIGN.LEFT,    18,  6, 0.0),
+    # The amending act's own preamble, as a Commission proposal sets it: the procedure
+    # number against the right margin, the title block centred over it, the citations
+    # and the enacting formula ranged left, and the recitals with their numbers hanging
+    # in the margin beside the text.
+    "OJ Procedure":     (10, False, False, ALIGN.RIGHT,    0, 18, 0.0),
+    "OJ Proposal Lead": (10, False, False, ALIGN.CENTER,   0,  6, 0.0),
+    "OJ Proposal Title":(12, True,  False, ALIGN.CENTER,   0,  6, 0.0),
+    "OJ Proposal Subtitle": (11, True, False, ALIGN.CENTER, 0, 12, 0.0),
+    "OJ Proposal Note": (10, False, False, ALIGN.CENTER,    0, 18, 0.0),
+    "OJ Formula":       (10, False, False, ALIGN.LEFT,     0, 10, 0.0),
+    "OJ Recital":       (10, False, False, ALIGN.JUSTIFY,  0,  8, 1.25),
+    "OJ Footnote":      (8,  False, False, ALIGN.LEFT,     0,  2, 1.25),
 }
+
+# Styles whose first line hangs back into the left indent, in cm. A recital's number
+# stands in the margin beside its text rather than running into it, which is what makes
+# a page of them readable at a glance.
+OJ_HANGING = {"OJ Recital": 1.25, "OJ Footnote": 1.25}
 
 
 @dataclass
@@ -129,6 +146,12 @@ class TrackedDocx:
             style.paragraph_format.space_after = Pt(after)
             if indent:
                 style.paragraph_format.left_indent = Cm(indent)
+            hanging = OJ_HANGING.get(name)
+            if hanging:
+                style.paragraph_format.first_line_indent = Cm(-hanging)
+                # Without an explicit stop the tab after the number goes to Word's
+                # default grid instead of the indent the text is set at.
+                style.paragraph_format.tab_stops.add_tab_stop(Cm(hanging))
             # Headings belong with what they head.
             style.paragraph_format.keep_with_next = align is ALIGN.CENTER
 
@@ -187,10 +210,28 @@ class TrackedDocx:
 
     def inserted(self, text: str, style: str | None = None) -> Block:
         """A wholly new paragraph."""
+        return self.inserted_pieces([(text, False)], style)
+
+    def inserted_pieces(self, pieces, style: str | None = None) -> Block:
+        """A wholly new paragraph built from ``(text, superscript)`` pairs.
+
+        Superscript is set on the run rather than in the style, because it applies to
+        part of a paragraph — a footnote reference — and there is nowhere else to put
+        it. That is safe here in a way it would not be for a deletion: accepting an
+        insertion keeps the run and the formatting on it, and rejecting one takes both
+        away together.
+        """
         p = self.doc.add_paragraph(style=style)
-        run = self._revise(self._run(p, text), "ins")
+        runs = []
+        for text, superscript in pieces:
+            if not text:
+                continue
+            run = self._run(p, text)
+            if superscript:
+                run.font.superscript = True
+            runs.append(self._revise(run, "ins"))
         self._mark_paragraph(p, "ins")
-        return Block(p, [run], "inserted")
+        return Block(p, runs, "inserted")
 
     def deleted(self, text: str, style: str | None = None) -> Block:
         """A wholly removed paragraph."""

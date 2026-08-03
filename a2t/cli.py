@@ -359,13 +359,18 @@ def resolve(pdf: Path, cache: Path, as_of, verbose: bool, llm: bool,
               default=Path("out/llmcache"), show_default=True)
 @click.option("--author", default="A2T", show_default=True,
               help="Author name recorded on every tracked change.")
+@click.option("--recitals/--no-recitals", default=False,
+              help="Insert the proposal's own preamble — title, citations and "
+                   "recitals — ahead of the articles, as tracked insertions.")
 def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
-            model: str | None, llm_cache: Path, author: str) -> None:
+            model: str | None, llm_cache: Path, author: str,
+            recitals: bool) -> None:
     """Convert an amendment proposal into tracked-changes Word documents."""
     from a2t.apply.changeset import build_changeset
     from a2t.config import ConfigError, load_settings
     from a2t.emit.document import emit_document
     from a2t.emit.report import ActOutcome, RunReport, write_report
+    from a2t.extract.preamble import PreambleError, preamble as read_preamble
     from a2t.parse.rules import classify_all
     from a2t.parse.segment import segment
     from a2t.resolve.fallback import apply_llm_fallback
@@ -394,11 +399,23 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
     if on_date is None:
         raise click.ClickException("could not find the proposal date; pass --as-of")
 
+    front = None
+    if recitals:
+        try:
+            front = read_preamble(lines, pdf)
+        except PreambleError as exc:
+            raise click.ClickException(f"--recitals: {exc}") from exc
+        click.echo(f"preamble: {front.summary()} "
+                   f"(source lines {front.source_lines[0]}-{front.source_lines[1]})")
+        for note in front.notes:
+            click.echo(f"  note: {note}")
+
     provider = EurlexBuilderProvider(cache_dir=cache)
     by_celex = {t.celex: t for t in detection.targets}
     run = RunReport(source=pdf, proposal_date=on_date.isoformat(),
                     detection_targets=detection.targets,
-                    discrepancies=detection.discrepancies)
+                    discrepancies=detection.discrepancies,
+                    preamble=front)
 
     click.echo(f"{pdf.name} — proposal date {on_date.isoformat()}")
     for target in detection.targets:
@@ -437,7 +454,8 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
 
         document = outdir / f"{pinned}_tracked.docx"
         emitted = emit_document(act, changeset, document, author=author,
-                                version_warning=acquired.warning)
+                                version_warning=acquired.warning,
+                                preamble=front)
 
         run.outcomes.append(ActOutcome(
             block=block, celex=block.celex, version=pinned, title=retrieved.title,

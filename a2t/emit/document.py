@@ -18,6 +18,7 @@ from pathlib import Path
 from a2t.apply.changeset import Change, ChangeKind, ChangeSet
 from a2t.apply.diff import Pair, Span, diff
 from a2t.emit.tracked_docx import TrackedDocx
+from a2t.extract.preamble import Preamble
 from a2t.model.payload import Provision, printed, structure
 from a2t.model.tree import Act, Kind, Node
 
@@ -55,22 +56,29 @@ class EmitResult:
     paragraphs: int = 0
     revisions: int = 0
     comments: int = 0
+    preamble_paragraphs: int = 0
     rendered: list[Change] = field(default_factory=list)
     unrendered: list[Change] = field(default_factory=list)
 
     def summary(self) -> str:
+        preamble = (
+            f", {self.preamble_paragraphs} of preamble" if self.preamble_paragraphs
+            else ""
+        )
         return (
             f"{self.paragraphs} paragraphs, {self.revisions} revised, "
-            f"{self.comments} comment(s)"
+            f"{self.comments} comment(s){preamble}"
         )
 
 
 class DocumentEmitter:
     def __init__(self, act: Act, changeset: ChangeSet, author: str = "A2T",
-                 version_warning: str | None = None):
+                 version_warning: str | None = None,
+                 preamble: Preamble | None = None):
         self.act = act
         self.changeset = changeset
         self.version_warning = version_warning
+        self.preamble = preamble
         self.doc = TrackedDocx(author=author)
         self.by_node = changeset.by_node()
         self.result = EmitResult(path=Path())
@@ -82,6 +90,7 @@ class DocumentEmitter:
     def emit(self, path: str | Path) -> EmitResult:
         path = Path(path)
         self._front_matter()
+        self._preamble()
         for child in self.act.root.children:
             self._render(child)
         self._insertions_for(self.act.root)
@@ -121,6 +130,63 @@ class DocumentEmitter:
         for line in (self.version_warning or "").splitlines():
             self.doc.unchanged(f"⚠ Version warning: {line}", style="OJ Warning")
             self.result.paragraphs += 1
+
+    def _preamble(self) -> None:
+        """The amending act's own preamble, inserted ahead of the articles.
+
+        Every paragraph of it is a revision, so rejecting the document's changes leaves
+        the base act exactly as it stands. Accepting them leaves the preamble in place,
+        which is not what adopting the proposal would do — an amending act keeps its
+        recitals rather than passing them to the act it amends. That is why this is
+        behind a flag and off by default.
+        """
+        source = self.preamble
+        if source is None:
+            return
+
+        written = 0
+
+        def write(pieces, style: str) -> None:
+            nonlocal written
+            self.doc.inserted_pieces(pieces, style=style)
+            written += 1
+
+        if source.procedure:
+            write([(source.procedure, False)], "OJ Procedure")
+        for index, para in enumerate(source.title):
+            # "Proposal for a", then the act's designation, then what it amends.
+            # "(Text with EEA relevance)" closes the block, set plain rather than
+            # bold like the designation and what it amends.
+            style = ("OJ Proposal Lead" if index == 0 else
+                     "OJ Proposal Title" if index == 1 else
+                     "OJ Proposal Note" if para.text.startswith("(") else
+                     "OJ Proposal Subtitle")
+            write([(p.text, p.superscript) for p in para.pieces], style)
+        if source.institutions:
+            write([(source.institutions, False)], "OJ Formula")
+        for para in source.citations:
+            write([(p.text, p.superscript) for p in para.pieces], "OJ Formula")
+        write([(source.whereas, False)], "OJ Formula")
+
+        for recital in source.recitals:
+            pieces = [(f"({recital.number})", False), ("\t", False)]
+            pieces += [(p.text, p.superscript) for p in recital.pieces]
+            write(pieces, "OJ Recital")
+
+        if source.footnotes:
+            # The proposal prints these at the foot of the page that cites them. A Word
+            # document is not paginated the same way and `python-docx` cannot write the
+            # footnote part, so they are gathered here, below the text that refers to
+            # them and above the articles.
+            write([("_" * 24, False)], "OJ Footnote")
+            for number, text in source.footnotes:
+                write([(number, True), ("\t", False), (text, False)], "OJ Footnote")
+
+        write([(source.enacting, False)], "OJ Formula")
+
+        self.result.paragraphs += written
+        self.result.revisions += written
+        self.result.preamble_paragraphs = written
 
     # ----------------------------------------------------------------- walking
 
@@ -384,5 +450,6 @@ class DocumentEmitter:
 
 def emit_document(act: Act, changeset: ChangeSet, path: str | Path,
                   author: str = "A2T",
-                  version_warning: str | None = None) -> EmitResult:
-    return DocumentEmitter(act, changeset, author, version_warning).emit(path)
+                  version_warning: str | None = None,
+                  preamble: Preamble | None = None) -> EmitResult:
+    return DocumentEmitter(act, changeset, author, version_warning, preamble).emit(path)

@@ -189,6 +189,76 @@ def paragraph_starts(pdf_path: str | Path) -> list[tuple[str, bool]]:
     return out
 
 
+# A superscript is set smaller than the text it sits in and raised above its top. Both
+# hold with room to spare in this corpus — a reference is 7.24pt tall against a 10.80pt
+# line — so the thresholds only have to separate two clearly separated populations.
+SUPERSCRIPT_HEIGHT = 0.85  # of the line's dominant glyph height
+DIGITS = re.compile(r"^\d{1,3}$")
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if not ordered:
+        return 0.0
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def superscripts(pdf_path: str | Path, first_page: int | None = None,
+                 last_page: int | None = None) -> list[tuple[str, str]]:
+    """The footnote references in the PDF, as (preceding word, number), in order.
+
+    `-layout` renders a superscript as a digit glued to the word before it — "the Paris
+    Agreement3, adopted on" — and a digit glued to a word is not by itself a footnote
+    reference: "Q1 2027" and "CO2" have the same shape. Nor is the sequence 1, 2, 3 …
+    enough on its own, because poppler sometimes separates the marker with a space and
+    then "of 30 June" is indistinguishable from a reference to footnote 30.
+
+    Geometry settles it. `-bbox-layout` gives every word a box, and a reference is set
+    smaller than its line and raised above it, which no figure in the running text is.
+    Returning the word each marker follows lets the caller find it in the `-layout` text
+    without trusting either the shape of the digits or their order alone.
+    """
+    command = ["pdftotext", "-bbox-layout"]
+    if first_page is not None:
+        command += ["-f", str(first_page)]
+    if last_page is not None:
+        command += ["-l", str(last_page)]
+    proc = subprocess.run(
+        [*command, str(pdf_path), "-"], capture_output=True, text=True, encoding="utf-8"
+    )
+    if proc.returncode != 0:
+        _warn_no_layout(proc.stderr.strip())
+        return []
+    try:
+        root = ET.fromstring(proc.stdout.encode())
+    except ET.XMLSyntaxError as exc:
+        _warn_no_layout(str(exc))
+        return []
+
+    found: list[tuple[str, str]] = []
+    for line in root.iter(f"{XHTML}line"):
+        words = [w for w in line.iter(f"{XHTML}word") if (w.text or "").strip()]
+        if len(words) < 2:
+            continue
+        boxes = [
+            (w, float(w.get("yMax", 0)) - float(w.get("yMin", 0)), float(w.get("yMax", 0)))
+            for w in words
+        ]
+        body_height = _median([h for _, h, _ in boxes])
+        body_top = _median([top for _, _, top in boxes])
+        for index, (word, height, top) in enumerate(boxes):
+            if not DIGITS.match((word.text or "").strip()):
+                continue
+            if height >= body_height * SUPERSCRIPT_HEIGHT or top >= body_top:
+                continue
+            previous = (boxes[index - 1][0].text or "").strip() if index else ""
+            found.append((previous, (word.text or "").strip()))
+    return found
+
+
 def _mark_paragraphs(lines: list[Line], blocks: list[tuple[str, bool]]) -> list[Line]:
     """Carry poppler's paragraph boundaries onto the lines we extracted.
 

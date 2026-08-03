@@ -134,12 +134,19 @@ def _footnote_block_start(lines: list[Line], lo: int, hi: int) -> int | None:
         if nxt is None or lines[nxt].indent <= lines[i].indent:
             continue
         # Everything from here to the foot of the page must look like apparatus:
-        # further markers, their indented text, or blanks. This stops a stray
-        # numeral in body text from swallowing real content.
+        # further markers, their text, or blanks. This stops a stray numeral in body
+        # text from swallowing real content.
+        #
+        # The opener above is what identifies the block — a marker with indented text
+        # under it. Once that is established, a *continuation* line only has to stay
+        # within the block's own margin: a footnote long enough to wrap sometimes comes
+        # back at the marker's indent rather than the text's, and requiring every line
+        # to be more indented than the marker loses the whole footnote, which then
+        # reads as part of the provision above it.
         marker_indent = lines[i].indent
         if all(
             lines[j].blank
-            or lines[j].indent > marker_indent
+            or lines[j].indent >= marker_indent
             or FOOTNOTE_MARKER.fullmatch(lines[j].text)
             for j in range(i, hi + 1)
         ):

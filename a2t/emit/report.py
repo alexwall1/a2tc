@@ -37,6 +37,7 @@ class RunReport:
     discrepancies: list = field(default_factory=list)
     outcomes: list[ActOutcome] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    preamble: object | None = None
 
     def render(self) -> str:
         out: list[str] = []
@@ -44,6 +45,9 @@ class RunReport:
 
         add(f"# Conversion report — {self.source.name}\n")
         add(f"Proposal date: **{self.proposal_date}**\n")
+
+        if self.preamble is not None:
+            self._preamble_section(add)
 
         add("## Acts amended\n")
         add("| Act | CELEX (version) | Scope | Identified via |")
@@ -78,6 +82,27 @@ class RunReport:
         return "\n".join(out) + "\n"
 
     # ------------------------------------------------------------------ sections
+
+    def _preamble_section(self, add) -> None:
+        """What `--recitals` put into every document, and what it means.
+
+        The caveat is stated here rather than left implicit: these paragraphs are
+        inserted, so accepting the document's changes produces a base act carrying the
+        amending act's preamble — which adopting the proposal would not do.
+        """
+        front = self.preamble
+        add("## Preamble of the amending act\n")
+        add(f"Inserted ahead of the articles of every document, from source lines "
+            f"{front.source_lines[0]}–{front.source_lines[1]}: "
+            f"{front.summary()}.\n")
+        add("An amending act keeps its own recitals; it does not pass them to the act "
+            "it amends. These paragraphs are therefore marked as insertions but are "
+            "not amendments — rejecting every change removes them, accepting every "
+            "change leaves the base act carrying a preamble that is not its own.\n")
+        for note in getattr(front, "notes", []):
+            add(f"- ⚠ {note}")
+        if getattr(front, "notes", []):
+            add("")
 
     def _act_section(self, outcome: ActOutcome, add) -> None:
         add(f"## {outcome.block.citation}\n")

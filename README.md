@@ -52,10 +52,46 @@ Base-act retrieval dominates the runtime; expect a couple of minutes.
 | `--model TEXT` | OpenRouter model id (default `openai/gpt-5-nano`). |
 | `--cache PATH` | Where retrieved acts are cached (default `~/.cache/a2t/acts`). |
 | `--author TEXT` | Author name recorded on every tracked change (default `A2T`). |
+| `--recitals` | Insert the proposal's own preamble ahead of the articles, as tracked insertions. Off by default — see below. |
 
 The LLM tier is optional and needs an OpenRouter key, from `$OPENROUTER_API_KEY` or
 a `.openrouter_key` file in the project root. Without `--llm` the app is entirely
 offline apart from EUR-Lex retrieval.
+
+## Recitals
+
+`--recitals` puts the amending act's own front matter into every document it writes,
+ahead of the articles and in the order the Official Journal prints it:
+
+```
+2026/0212 (COD)                                          ← inserted
+            Proposal for a
+DIRECTIVE OF THE EUROPEAN PARLIAMENT AND OF THE COUNCIL
+amending Directive 2003/87/EC and Decision (EU) 2015/1814 …
+            (Text with EEA relevance)
+THE EUROPEAN PARLIAMENT AND THE COUNCIL OF THE EUROPEAN UNION,
+Having regard to …
+Whereas:
+(1)   The Paris Agreement³, adopted on 12 December 2015 …
+      … (98 recitals)
+HAVE ADOPTED THIS DIRECTIVE:                             ← inserted
+Article 1                                                ← base text + revisions
+```
+
+Every one of those paragraphs is a revision, so rejecting the document's changes still
+leaves the base act exactly as it stands today.
+
+It is off by default because accepting them does *not* give the act as the proposal
+would leave it. An amending act keeps its own recitals — it does not pass them to the
+act it amends, and none of the sixteen acts amending Directive 2003/87/EC contains a
+single instruction touching that Directive's recitals. So the preamble is printed as
+context for the amendments, not as one of them, and `report.md` says so.
+
+Footnote references are read from the page geometry rather than the text, because
+`pdftotext` renders a superscript as a digit run against the word before it and there
+is no way to tell "Agreement³" from "CO2" by shape. Their texts are gathered below the
+recitals rather than at the foot of each page: a Word document is not paginated the way
+the PDF is, and `python-docx` cannot write the footnote part.
 
 ## Other commands
 
@@ -86,8 +122,9 @@ line at the top of each test module) and run `a2t retrieve` once to fill the cac
 
 ## Scope
 
-Articles only. Annexes, recitals of the amending act, and languages other than
-English are out of scope. Output documents follow the typography of the Official
+Articles only. Annexes and languages other than English are out of scope. The amending
+act's recitals are printed on request (`--recitals`) but never resolved or amended —
+nothing in a proposal amends the recitals of the act it amends. Output documents follow the typography of the Official
 Journal — Times New Roman, 10pt justified body, centred article headings.
 
 See `PLAN.md` for the design and the reasoning behind it.
