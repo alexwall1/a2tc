@@ -385,7 +385,12 @@ class DocumentEmitter:
         # sides of this edit, so that a payload restating it diffs against it rather
         # than replacing it with itself. Adding it again here would print it twice.
         self._take_number()
-        notes = _Notes(change.instruction)
+        # A change that only strikes text has nowhere to put a note: the payload's
+        # footnotes belong to whichever change inserts the payload. One instruction can
+        # produce both — Art. 1(14)(a) replaces one subparagraph and deletes the next —
+        # and reporting them unplaced here would flag a deletion for a marker that the
+        # replacement carried perfectly well.
+        notes = _Notes(change.instruction) if change.new_text else None
 
         if not change.blocks:
             mark = "del" if change.kind is ChangeKind.DELETE else None
@@ -408,9 +413,9 @@ class DocumentEmitter:
         self._drain_skips(written[0])
         self._note_unplaced(change, notes)
 
-    def _note_unplaced(self, change: Change, notes: _Notes) -> None:
+    def _note_unplaced(self, change: Change, notes: _Notes | None) -> None:
         """A footnote whose marker never turned up is reported, not dropped."""
-        if notes.unplaced:
+        if notes is not None and notes.unplaced:
             change.note = "; ".join(filter(None, [
                 change.note,
                 f"{len(notes.unplaced)} payload footnote(s) had no marker in the text",
