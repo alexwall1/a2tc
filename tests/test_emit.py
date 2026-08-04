@@ -229,6 +229,29 @@ def test_unapplied_instruction_is_listed_and_flagged(tmp_path):
     assert result.comments == 1
 
 
+def test_skip_that_names_a_provision_is_flagged_there_not_at_the_end(tmp_path):
+    """A provision left unamended has to say so where the reader meets it.
+
+    Listing it at the foot of the document instead leaves the provision reading as
+    though the proposal had nothing to say about it.
+    """
+    act = make_act()
+    node = act.article("1").by_key(Kind.PARAGRAPH, "2")
+    skipped = Change(ChangeKind.SKIPPED, instruction(), node=node,
+                     note="replaced by the payload applied at Article 1 / paragraph 1")
+    result = emit_document(act, ChangeSet(act=act, changes=[skipped]),
+                           tmp_path / "a.docx")
+
+    assert result.comments == 1
+    assert "Instructions not applied" not in texts(load(result.path))
+    comments = etree.fromstring(
+        zipfile.ZipFile(result.path).read("word/comments.xml")
+    )
+    assert "payload applied at Article 1 / paragraph 1" in " ".join(
+        t.text or "" for t in comments.iter(f"{W}t")
+    )
+
+
 def test_container_notes_do_not_clutter_the_document(tmp_path):
     act = make_act()
     skipped = Change(ChangeKind.SKIPPED, instruction(op=Op.CONTAINER),

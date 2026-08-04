@@ -142,6 +142,12 @@ class DocumentEmitter:
         self.result = EmitResult(path=Path())
         self._seen: set[int] = set()
         self._number = ""  # a paragraph number waiting for the block that carries it
+        # Skips that name a provision, waiting for the block that provision prints as.
+        # A numbered paragraph is often a node with no words of its own, so the comment
+        # cannot always go on the node it belongs to; it goes on the first block the
+        # node's subtree writes.
+        self._pending_skips: list[Change] = []
+        self._noted: set[int] = set()
 
     # ---------------------------------------------------------------------- api
 
@@ -256,6 +262,9 @@ class DocumentEmitter:
     def _render(self, node: Node) -> None:
         changes = self.by_node.get(id(node), [])
         whole = next((c for c in changes if c.kind in WHOLE_NODE), None)
+        self._pending_skips += [
+            c for c in changes if c.kind is ChangeKind.SKIPPED and c.note
+        ]
 
         if node.kind is Kind.PARAGRAPH and node.key and not node.text:
             # EUR-Lex keeps a paragraph's number outside its words: the number is a
@@ -334,6 +343,16 @@ class DocumentEmitter:
             self.doc.unchanged(node.title, style="OJ Article Title")
         self.result.paragraphs += 1
 
+    def _drain_skips(self, block) -> None:
+        """Put the waiting skips onto the block their provision just printed as."""
+        if not self._pending_skips or not block.runs:
+            return
+        for change in self._pending_skips:
+            self.doc.flag(block.runs[0], f"Not applied — {change.note}")
+            self.result.comments += 1
+            self._noted.add(id(change))
+        self._pending_skips = []
+
     def _own_text(self, node: Node, changes: list[Change]) -> None:
         edits = [c for c in changes if c.kind is ChangeKind.TEXT_EDIT]
         if edits:
@@ -346,11 +365,13 @@ class DocumentEmitter:
                                         style=self._style(node))
             for change in edits:
                 self._account(change, block, count_paragraph=change is edits[0])
+            self._drain_skips(block)
             return
         if node.text:
-            self.doc.unchanged(self._take_number() + self._prefixed(node),
-                               style=self._style(node))
+            block = self.doc.unchanged(self._take_number() + self._prefixed(node),
+                                       style=self._style(node))
             self.result.paragraphs += 1
+            self._drain_skips(block)
 
     def _whole_node(self, node: Node, change: Change) -> None:
         # The change set already put the paragraph number into the text on both
@@ -365,6 +386,7 @@ class DocumentEmitter:
                                         paragraph_mark=mark,
                                         notes=notes.pieces if notes else None)
             self._account(change, block)
+            self._drain_skips(block)
             self._note_unplaced(change, notes)
             return
 
@@ -376,6 +398,7 @@ class DocumentEmitter:
         # `_account` counts the last one.
         self.result.paragraphs += len(written) - 1
         self._account(change, written[0])
+        self._drain_skips(written[0])
         self._note_unplaced(change, notes)
 
     def _note_unplaced(self, change: Change, notes: _Notes) -> None:
@@ -458,6 +481,9 @@ class DocumentEmitter:
             c for c in self.changeset.changes
             if c.kind is ChangeKind.SKIPPED and c.note
             and "container" not in c.note
+            # One naming a provision has already said so in a comment there, where the
+            # reader meets it in context. Listing it again at the end says it twice.
+            and id(c) not in self._noted
         ]
         if not orphans:
             return

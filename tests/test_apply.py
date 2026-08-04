@@ -7,11 +7,13 @@ import pytest
 from a2t.apply.changeset import (
     Change,
     ChangeKind,
+    _opening,
     _substitute,
     build_changes,
     build_changeset,
     split_articles_payload,
     split_enumerated_payload,
+    split_leading,
 )
 from a2t.apply.diff import Span, align, diff, summarise
 from a2t.detect.targets import detect_targets
@@ -239,6 +241,80 @@ def test_payload_split_refused_when_text_precedes_the_first_number():
     payload = ("Article 2 1. The first paragraph, which is lost. "
                "2. The second. 3. The third.")
     assert split_enumerated_payload(payload, ["2", "3"]) is None
+
+
+def test_leading_split_leaves_the_provisions_the_payload_never_reaches():
+    """Three paragraphs replaced by two: the third has no replacement text."""
+    payload = "3. The new third paragraph. 4. The new fourth paragraph."
+    result = split_leading(payload, ["3", "4", "5"], _opening)
+    assert result is not None
+    segments, dropped = result
+    assert segments == ["3. The new third paragraph.", "4. The new fourth paragraph."]
+    assert dropped == ["5"]
+
+
+def test_leading_split_refuses_a_number_skipped_in_the_middle():
+    """3 and 5 but no 4 is numbering that has moved, not a provision deleted."""
+    payload = "3. The new third paragraph. 5. The new fifth paragraph."
+    assert split_leading(payload, ["3", "4", "5"], _opening) is None
+
+
+def test_a_provision_with_no_replacement_text_is_deleted():
+    """COM(2025) 524, Article 1(2): Article 4(3), (4) and (5) replaced by two.
+
+    Paragraph 5 is replaced by nothing, which is a deletion — not something to hand
+    back to the reader as unhandled.
+    """
+    act = Act(celex="TEST", title="t")
+    article = act.root.add(Node(Kind.ARTICLE, key="4"))
+    for key in ("3", "4", "5"):
+        paragraph = article.add(Node(Kind.PARAGRAPH, key=key))
+        paragraph.add(Node(Kind.SUBPARAGRAPH, text=f"The old paragraph {key}."))
+    nodes = article.of_kind(Kind.PARAGRAPH)
+
+    instr = instruction(
+        Op.REPLACE_NODE,
+        payload="3. The new third paragraph. 4. The new fourth paragraph.",
+    )
+    changes = build_changes(
+        Resolution(instr, nodes=nodes, status="resolved", enumerated=True)
+    )
+
+    assert [c.kind for c in changes] == [
+        ChangeKind.REPLACE, ChangeKind.REPLACE, ChangeKind.DELETE
+    ]
+    assert changes[0].new_text == "3. The new third paragraph."
+    assert changes[1].new_text == "4. The new fourth paragraph."
+    assert changes[2].node is nodes[2]
+    assert changes[2].new_text == ""
+    assert "5. The old paragraph 5." in changes[2].old_text
+    assert "replaced by nothing" in changes[2].note
+
+
+def test_undivided_payload_is_applied_once_not_to_every_target():
+    """COM(2025) 524 replaces Article 4(3), (4) and (5) with two paragraphs.
+
+    Nothing in that payload opens with "5.", so it cannot be cut three ways — and the
+    undivided block used to be applied to each target in turn, writing the same 605
+    words into all three provisions.
+    """
+    act = make_act()
+    nodes = act.article("3").of_kind(Kind.POINT)
+    payload = "‘new entrant’ means a new thing, and operators are not spoken of."
+    instr = instruction(Op.REPLACE_NODE, payload=payload)
+    changes = build_changes(
+        Resolution(instr, nodes=nodes, status="resolved", enumerated=True)
+    )
+
+    assert [c.kind for c in changes] == [ChangeKind.REPLACE, ChangeKind.SKIPPED]
+    assert changes[0].node is nodes[0]
+    assert changes[0].new_text == payload
+    # The second provision keeps its own text: which words are its replacement is
+    # exactly what could not be established.
+    assert changes[1].node is nodes[1]
+    assert changes[1].new_text == ""
+    assert nodes[1].citation not in changes[0].new_text
+    assert all(c.needs_review for c in changes)
 
 
 def test_articles_split_at_their_headings():

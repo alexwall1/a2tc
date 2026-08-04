@@ -168,9 +168,12 @@ def split_enumerated_payload(payload: str, keys: list[str]) -> list[str] | None:
     Returns None if the markers are not all present in order, in which case the
     caller must report rather than guess.
     """
-    return _cut(
-        payload, [re.compile(rf"(?:^|\s){re.escape(key)}\.\s+") for key in keys]
-    )
+    return _cut(payload, [_opening(key) for key in keys])
+
+
+def _opening(key: str) -> re.Pattern:
+    """The number a provision opens with, as it appears in a payload."""
+    return re.compile(rf"(?:^|\s){re.escape(key)}\.\s+")
 
 
 # A heading, as against the many cross-references to other articles that legislation
@@ -288,6 +291,110 @@ def _text_edit(instruction: Instruction, node: Node, replacement: str,
     )
 
 
+def split_leading(payload: str, keys: list[str],
+                  marker) -> tuple[list[str], list[str]] | None:
+    """Split a payload that provides text for only the first of several provisions.
+
+    "in Article 4, paragraphs 3, 4 and 5 are replaced by the following:", followed by a
+    new paragraph 3 and a new paragraph 4 — COM(2025) 524 — replaces three provisions
+    with two. The payload is not undivided; it is divided one cut short. What it
+    supplies replaces paragraphs 3 and 4, and paragraph 5, having no replacement text,
+    is replaced by nothing and goes.
+
+    Only a *leading* run counts. A payload naming 3 and 5 but not 4 has skipped one in
+    the middle, which is a mismatch rather than a deletion — the numbering has moved
+    under the instruction, and this project reports that instead of guessing. Cutting
+    on the longest prefix alone is not enough to catch that: 3 and 5 still cuts cleanly
+    on 3, and would put paragraph 5's new text inside paragraph 3 and delete 4 and 5.
+    So a provision said to be replaced by nothing must have nothing in the payload —
+    its number must be absent from it altogether.
+
+    Returns the segments and the keys left with nothing, or None.
+    """
+    for count in range(len(keys) - 1, 0, -1):
+        segments = _cut(payload, [marker(key) for key in keys[:count]])
+        if segments is None:
+            continue
+        if any(marker(key).search(payload) for key in keys[count:]):
+            return None
+        return segments, keys[count:]
+    return None
+
+
+def _replacements(instruction: Instruction, targets: list[Node],
+                  segments: list[str], total: int) -> list[Change]:
+    return [
+        Change(
+            ChangeKind.REPLACE, instruction, node=node,
+            old_text=opening_number(node) + node.full_text,
+            new_text=segment,
+            edit=diff(opening_number(node) + node.full_text, segment),
+            # The layout covers the whole payload, not this one segment of it, so the
+            # segment's own markers have to do the work — and, for a whole article, the
+            # heading it opens with, which only counts as one when the article it names
+            # is the one being replaced.
+            blocks=_blocks(instruction, node, segment,
+                           diff(opening_number(node) + node.full_text, segment),
+                           named=node.key if node.kind is Kind.ARTICLE else None),
+            note=f"payload split across {total} provisions",
+        )
+        for node, segment in zip(targets, segments)
+    ]
+
+
+def _replaced_by_nothing(instruction: Instruction, node: Node,
+                         supplied: list[str]) -> Change:
+    """A provision the instruction replaces but the payload never reaches."""
+    old = opening_number(node) + node.full_text
+    return Change(
+        ChangeKind.DELETE, instruction, node=node,
+        old_text=old, new_text="", edit=diff(old, ""),
+        note=(f"replaced by nothing — the payload supplies new text for "
+              f"{', '.join(supplied)} and stops, so this provision goes"),
+    )
+
+
+def _undivided(instruction: Instruction, targets: list[Node],
+               keys: list[str]) -> list[Change]:
+    """One payload, several provisions, and no way to divide it between them.
+
+    Letting the generic path have it applies the payload to each target in turn, which
+    writes the same new text into every one of them: COM(2025) 524 replaces Article
+    4(3), (4) and (5) of the European Climate Law with two paragraphs, so 5 is nowhere
+    in the payload and the cut fails — and the undivided block landed in all three
+    provisions, three copies of the same 605 words.
+
+    The payload is the new text for the range as a whole, so it goes to the first
+    provision of that range entire. The rest keep their old text and are reported,
+    because where one provision ends and the next begins is exactly what could not be
+    established here, and this project reports that rather than guessing at it.
+    """
+    head, rest = targets[0], targets[1:]
+    number = opening_number(head)
+    old = number + head.full_text
+    new = with_number(instruction.payload or "", number)
+    edit = diff(old, new)
+    covered = ", ".join(k for k in keys if k)
+    changes = [Change(
+        ChangeKind.REPLACE, instruction, node=head,
+        old_text=old, new_text=new, edit=edit,
+        blocks=_blocks(instruction, head, new, edit, instruction.payload_layout,
+                       instruction.payload_breaks, number),
+        note=(f"payload for {len(targets)} provisions ({covered}) could not be "
+              f"divided between them and is applied here in full"),
+    )]
+    changes += [
+        Change(
+            ChangeKind.SKIPPED, instruction, node=node,
+            note=(f"replaced by the payload applied at {head.citation}, which could "
+                  f"not be divided between {covered} — this provision is shown "
+                  f"unamended and has to be settled by hand"),
+        )
+        for node in rest
+    ]
+    return changes
+
+
 def build_changes(resolution: Resolution,
                   texts: dict[int, str] | None = None) -> list[Change]:
     """Every edit implied by one resolved instruction."""
@@ -319,38 +426,30 @@ def build_changes(resolution: Resolution,
         keys = [node.key or "" for node in targets]
         # Whole articles are divided by their headings; anything smaller by the number
         # it opens with.
-        segments = (
-            split_articles_payload(instruction.payload, keys)
-            if all(node.kind is Kind.ARTICLE for node in targets)
-            else split_enumerated_payload(instruction.payload, keys)
-        )
-        if segments is None:
-            instruction.note(
-                f"replaces {len(targets)} provisions but the payload could not be "
-                f"split by their numbers ({', '.join(keys)}) — needs review"
+        whole_articles = all(node.kind is Kind.ARTICLE for node in targets)
+        marker = _heading if whole_articles else _opening
+
+        segments = _cut(instruction.payload, [marker(key) for key in keys])
+        if segments is not None:
+            return _replacements(instruction, targets, segments, len(targets))
+
+        # Fewer provisions come out than went in: what the payload supplies replaces
+        # the provisions it names, and those it never reaches are replaced by nothing.
+        leading = split_leading(instruction.payload, keys, marker)
+        if leading is not None:
+            segments, dropped = leading
+            return (
+                _replacements(instruction, targets, segments, len(targets))
+                + [_replaced_by_nothing(instruction, node, keys[:len(segments)])
+                   for node in targets[len(segments):]]
             )
-            instruction.confidence = min(instruction.confidence, 0.4)
-        else:
-            return [
-                Change(
-                    ChangeKind.REPLACE, instruction, node=node,
-                    old_text=opening_number(node) + node.full_text,
-                    new_text=segment,
-                    edit=diff(opening_number(node) + node.full_text, segment),
-                    # The layout covers the whole payload, not this one segment of
-                    # it, so the segment's own markers have to do the work — and,
-                    # for a whole article, the heading it opens with, which only
-                    # counts as one when the article it names is the one being
-                    # replaced.
-                    blocks=_blocks(instruction, node, segment,
-                                   diff(opening_number(node) + node.full_text,
-                                        segment),
-                                   named=node.key
-                                   if node.kind is Kind.ARTICLE else None),
-                    note=f"payload split across {len(targets)} provisions",
-                )
-                for node, segment in zip(targets, segments)
-            ]
+
+        instruction.note(
+            f"replaces {len(targets)} provisions but the payload could not be "
+            f"split by their numbers ({', '.join(keys)}) — needs review"
+        )
+        instruction.confidence = min(instruction.confidence, 0.4)
+        return _undivided(instruction, targets, keys)
 
     for node in targets:
         if instruction.op is Op.REPLACE_NODE:

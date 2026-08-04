@@ -135,8 +135,11 @@ class RunReport:
         if skipped:
             add("### Not applied\n")
             for change in skipped:
+                # One instruction can skip at several provisions for the same reason,
+                # so the note alone does not say which of them this line is about.
+                at = f", {change.citation}" if change.node is not None else ""
                 add(f"- `{change.instruction.id}` (line "
-                    f"{change.instruction.source_line}): {change.note}")
+                    f"{change.instruction.source_line}){at}: {change.note}")
                 add(f"  > {change.instruction.raw[:160]}")
             add("")
 
