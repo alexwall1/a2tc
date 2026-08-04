@@ -104,10 +104,29 @@ def resolve(path: Path, root: Act | Node) -> Node | None:
                 found = root.article(step.key)
             node = found
         elif step.index is not None:
-            node = node.by_index(step.kind, step.index)
+            node = _by_index(node, step)
         else:
             return None
     return node
+
+
+def _by_index(node: Node, step: Step) -> Node | None:
+    """The step-th child of that kind, allowing for how an article divides.
+
+    An article with numbered paragraphs divides into paragraphs, and the blocks making
+    up one of them are its subparagraphs. An article with no numbered paragraphs
+    divides straight into unnumbered blocks — and those are what drafters call its
+    paragraphs: COM(2025) 524 amends "Article 1, second paragraph" of the European
+    Climate Law, whose Article 1 is three unnumbered blocks and not one numbered
+    paragraph. The tree calls those subparagraphs in both cases, so a paragraph ordinal
+    has to be able to reach them; but only where there is no numbered paragraph to mean
+    instead, since everywhere else the two words address different things.
+    """
+    found = node.by_index(step.kind, step.index)
+    if (found is None and step.kind is Kind.PARAGRAPH
+            and not node.of_kind(Kind.PARAGRAPH)):
+        return node.by_index(Kind.SUBPARAGRAPH, step.index)
+    return found
 
 
 def _resolve_sentence(node: Node, step: Step) -> Node | None:

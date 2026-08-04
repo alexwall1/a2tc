@@ -164,6 +164,33 @@ def test_negative_index_addresses_from_the_end(act):
     assert penultimate is para.of_kind(Kind.SUBPARAGRAPH)[3]
 
 
+def test_paragraph_ordinal_reaches_an_article_that_has_no_numbered_paragraphs():
+    """"in Article 1, second paragraph" — COM(2025) 524 on the European Climate Law.
+
+    That Article 1 is three unnumbered blocks, which the tree calls subparagraphs; a
+    drafter calls them the article's paragraphs, because there are no others.
+    """
+    act = Act(celex="TEST", title="t")
+    article = act.root.add(Node(Kind.ARTICLE, key="1"))
+    for text in ("This Regulation establishes a framework.",
+                 "This Regulation sets out a binding objective.",
+                 "This Regulation applies to emissions."):
+        article.add(Node(Kind.SUBPARAGRAPH, text=text))
+
+    node = resolve(NodePath((Step(Kind.ARTICLE, "1"),
+                             Step(Kind.PARAGRAPH, index=2))), act)
+    assert node is not None
+    assert node.text.startswith("This Regulation sets out")
+
+
+def test_paragraph_ordinal_still_means_the_numbered_paragraph_where_there_is_one(act):
+    """The fallback must not reach past a numbered paragraph to a block inside one."""
+    node = resolve(NodePath((Step(Kind.ARTICLE, "10a"),
+                             Step(Kind.PARAGRAPH, index=2))), act)
+    assert node is act.article("10a").of_kind(Kind.PARAGRAPH)[1]
+    assert node.kind is Kind.PARAGRAPH
+
+
 def test_unresolvable_path_returns_none(act):
     assert resolve(NodePath((Step(Kind.ARTICLE, "999"),)), act) is None
     assert resolve(
