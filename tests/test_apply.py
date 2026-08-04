@@ -643,6 +643,24 @@ def test_deleted_paragraphs_become_two_deletions(changes):
 
 
 @pytestmark_corpus
+def test_a_run_replaced_as_a_whole_leaves_nothing_of_it_standing(changes):
+    """Art. 1(14)(a): the first and second subparagraphs of Article 10(1).
+
+    One payload, two provisions and no numbers to divide it by: it stands where the
+    run begins and what it replaced goes with it — not one copy in each, and not the
+    second left holding text the amendment repeals.
+    """
+    replaced, deleted = changes["1.14.a"]
+    assert replaced.kind is ChangeKind.REPLACE
+    assert replaced.node.citation.endswith("paragraph 1 / subparagraph 1")
+    assert replaced.new_text.startswith("1. At least 57 %")
+    assert deleted.kind is ChangeKind.DELETE
+    assert deleted.node.citation.endswith("paragraph 1 / subparagraph 2")
+    assert deleted.old_text.startswith("From 2021 onwards")
+    assert deleted.node.parent.of_kind(Kind.SUBPARAGRAPH)[2].text.startswith("2 %")
+
+
+@pytestmark_corpus
 def test_new_provisions_are_pure_insertions(corpus):
     inserts = [c for cs in corpus.values() for c in cs.renderable
                if c.kind is ChangeKind.INSERT]

@@ -108,15 +108,15 @@ def test_redundant_scope_detection():
 
 
 def test_rule_engine_coverage(reports):
-    """112 of 114 resolve by rules alone; the other two are correctly refused.
+    """113 of 114 resolve by rules alone; the other one is correctly refused.
 
-    They were previously "resolved" by falling back to the enclosing scope, which is
+    It was previously "resolved" by falling back to the enclosing scope, which is
     the silent-mistarget failure mode — see the test below.
     """
     total = sum(len(r.applicable) for _, _, r in reports.values())
     resolved = sum(len(r.resolved) for _, _, r in reports.values())
     assert total == 114
-    assert resolved == 112
+    assert resolved == 113
 
 
 def test_unreadable_target_is_refused_not_widened(resolutions):
@@ -124,14 +124,26 @@ def test_unreadable_target_is_refused_not_widened(resolutions):
 
     `1.33.a` reads "in paragraph 7, first subparagraph, the sole footnote is deleted".
     Falling back to the scope would delete the whole subparagraph rather than its
-    footnote — a destructive edit that looks like a clean resolution. Both cases are
-    handed to the LLM tier instead.
+    footnote — a destructive edit that looks like a clean resolution. It is handed to
+    the LLM tier instead.
     """
-    for ident in ("1.14.a", "1.33.a"):
-        result = resolutions[ident]
-        assert not result.ok, ident
-        assert "could not be parsed" in result.reason
-        assert "refusing to fall back" in result.reason
+    result = resolutions["1.33.a"]
+    assert not result.ok
+    assert "could not be parsed" in result.reason
+    assert "refusing to fall back" in result.reason
+
+
+def test_a_run_addressed_by_ordinal_resolves_to_every_member(resolutions):
+    """`1.14.a` reads "in paragraph 1, the first and second subparagraphs are
+
+    replaced by the following". Both are addressed, and neither the phrase nor the
+    payload names a number to divide them by.
+    """
+    result = resolutions["1.14.a"]
+    assert result.ok and result.enumerated
+    assert [n.citation.split(" / ")[-1] for n in result.targets] == [
+        "subparagraph 1", "subparagraph 2",
+    ]
 
 
 def test_annex_amendment_is_not_applicable(resolutions):
@@ -246,7 +258,24 @@ def test_text_replacement_verifies_the_phrase_exists(resolutions):
     ],
 )
 def test_parse_enumeration(phrase, kind, keys):
-    assert parse_enumeration(phrase) == (kind, keys)
+    assert parse_enumeration(phrase) == (kind, [Step(kind, key=key) for key in keys])
+
+
+@pytest.mark.parametrize(
+    "phrase, kind, indices",
+    [
+        ("the first and second subparagraphs", Kind.SUBPARAGRAPH, [1, 2]),
+        ("the second, third and fourth sentences", Kind.SENTENCE, [2, 3, 4]),
+        ("the last two subparagraphs", None, None),  # a count, not an enumeration
+        ("the following paragraphs", None, None),
+    ],
+)
+def test_parse_ordinal_enumeration(phrase, kind, indices):
+    expected = (
+        None if kind is None
+        else (kind, [Step(kind, index=index) for index in indices])
+    )
+    assert parse_enumeration(phrase) == expected
 
 
 @pytest.mark.parametrize("phrase", ["paragraph 6", "Article 10a", "point (h)", None])

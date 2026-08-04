@@ -134,17 +134,27 @@ PLURAL_HEAD = re.compile(
 BARE_KEY = re.compile(
     r"^(?:and\s+)?\(?(?P<key>\d+(?:-?[a-z]+)?|[a-z]{1,3})\)?$", re.I
 )
+# "the first and second subparagraphs" — unnumbered provisions have no keys to be
+# listed by, so the ordinals come first and the noun closes the phrase.
+ORDINAL_RUN = re.compile(r"^(?:the\s+)?(?P<ordinals>[a-z, -]+?)\s+(?P<noun>[a-z]+s)$",
+                         re.I)
 
 
-def parse_enumeration(text: str | None) -> tuple[Kind, list[str]] | None:
+def parse_enumeration(text: str | None) -> tuple[Kind, list[Step]] | None:
     """Parse a phrase addressing several provisions at once.
 
-    Returns `(kind, keys)` when the phrase names more than one, else None. Such a
+    Returns `(kind, steps)` when the phrase names more than one, else None. Such a
     phrase has no single node, so it must be reported rather than collapsed onto
     whichever member happens to parse.
     """
     if not text:
         return None
+    keyed = _keyed_enumeration(text)
+    return keyed if keyed is not None else _ordinal_enumeration(text)
+
+
+def _keyed_enumeration(text: str) -> tuple[Kind, list[Step]] | None:
+    """"paragraphs 3-e, 3-d, 3-c, and 3-b" — each named by its number."""
     fragments = [f.strip() for f in re.split(r",|\band\b", text) if f.strip()]
     if len(fragments) < 2:
         return None
@@ -162,7 +172,30 @@ def parse_enumeration(text: str | None) -> tuple[Kind, list[str]] | None:
         if match is None:
             return None
         keys.append(match.group("key").lower())
-    return kind, keys
+    return kind, [Step(kind, key=key) for key in keys]
+
+
+def _ordinal_enumeration(text: str) -> tuple[Kind, list[Step]] | None:
+    """"the first and second subparagraphs" — each named by where it sits."""
+    match = ORDINAL_RUN.match(text.strip())
+    if match is None:
+        return None
+    kind = KIND_NOUNS.get(match.group("noun").lower())
+    if kind is None:
+        return None
+    words = [w.strip() for w in re.split(r",|\band\b", match.group("ordinals"))
+             if w.strip()]
+    if len(words) < 2:
+        return None
+    indices = [parse_ordinal(word) for word in words]
+    if any(index is None for index in indices):
+        return None
+    return kind, [Step(kind, index=index) for index in indices]
+
+
+def _named(step: Step) -> str:
+    """A step as the instruction that gave it would put it."""
+    return step.key if step.key is not None else str(step)
 
 
 def targets_title(text: str | None) -> bool:
@@ -399,16 +432,19 @@ class Resolver:
         result.instruction.note(result.doubt)
 
     def _resolve_enumeration(self, instruction: Instruction, context: Path,
-                             kind: Kind, keys: list[str]) -> Resolution:
+                             kind: Kind, steps: list[Step]) -> Resolution:
         """Apply one instruction to each of the provisions it names."""
         found, missing = [], []
-        for key in keys:
-            path = Path(context.steps + (Step(kind, key=key),))
+        for step in steps:
+            path = Path(context.steps + (step,))
             node = resolve(path, self.act)
-            (found if node is not None else missing).append(node if node else key)
+            (found if node is not None else missing).append(
+                node if node is not None else _named(step)
+            )
 
         instruction.note(
-            f"addresses {len(keys)} {kind.value}s at once: {', '.join(keys)}"
+            f"addresses {len(steps)} {kind.value}s at once: "
+            f"{', '.join(_named(step) for step in steps)}"
         )
         if missing:
             return Resolution(

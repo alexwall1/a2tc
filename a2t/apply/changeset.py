@@ -408,6 +408,64 @@ def _replaced_by_nothing(instruction: Instruction, node: Node,
     )
 
 
+def _adjacent(nodes: list[Node]) -> bool:
+    """Siblings of one kind, in an unbroken run."""
+    first = nodes[0]
+    return all(
+        node.parent is first.parent and node.kind is first.kind
+        and node.index == first.index + offset
+        for offset, node in enumerate(nodes)
+    )
+
+
+def _replaced_as_a_run(instruction: Instruction, targets: list[Node]) -> list[Change]:
+    """Unnumbered provisions replaced together: "the first and second subparagraphs".
+
+    Art. 1(14)(a) of COM(2026) 47 replaces the first two subparagraphs of Article 10(1)
+    of the ETS Directive with a single new one, leaving the other three standing. There
+    are no numbers to divide the payload by — an unnumbered provision is addressed by
+    where it sits, not by a key — and the instruction does not divide it either: it
+    gives the run one new text. So the payload stands where the run begins, and the
+    provisions it displaces go with it.
+
+    Only for a run that is unbroken. Where the provisions named are not adjacent, what
+    lies between them would end up after everything the payload supplies, which is not
+    what the instruction says.
+    """
+    if not _adjacent(targets):
+        return [Change(
+            ChangeKind.SKIPPED, instruction, node=targets[0],
+            note=(f"replaces {len(targets)} provisions that are not adjacent, with a "
+                  f"payload carrying no numbers to divide it between them"),
+        )]
+
+    head, rest = targets[0], targets[1:]
+    number = opening_number(head)
+    old = number + head.full_text
+    new = with_number(instruction.payload or "", number)
+    edit = diff(old, new)
+    noun = head.kind.value
+    changes = [Change(
+        ChangeKind.REPLACE, instruction, node=head,
+        old_text=old, new_text=new, edit=edit,
+        blocks=_blocks(instruction, head, new, edit, instruction.payload_layout,
+                       instruction.payload_breaks, number),
+        note=(f"the new text of the {len(targets)} {noun}s replaced together, which "
+              f"the instruction gives undivided, stands here"),
+    )]
+    changes += [
+        Change(
+            ChangeKind.DELETE, instruction, node=node,
+            old_text=opening_number(node) + node.full_text, new_text="",
+            edit=diff(opening_number(node) + node.full_text, ""),
+            note=(f"replaced together with {head.citation} by the payload applied "
+                  f"there, so this {noun} goes"),
+        )
+        for node in rest
+    ]
+    return changes
+
+
 def _undivided(instruction: Instruction, targets: list[Node],
                keys: list[str]) -> list[Change]:
     """One payload, several provisions, and no way to divide it between them.
@@ -477,6 +535,10 @@ def build_changes(resolution: Resolution,
     # One instruction, several provisions, one payload carrying all their new text.
     if (resolution.enumerated and instruction.op is Op.REPLACE_NODE
             and instruction.payload and len(targets) > 1):
+        # Addressed by position rather than by number, so there is nothing in the
+        # payload to cut on and the run is replaced as one provision.
+        if all(node.key is None for node in targets):
+            return _replaced_as_a_run(instruction, targets)
         keys = [node.key or "" for node in targets]
         # Whole articles are divided by their headings; anything smaller by the number
         # it opens with.
