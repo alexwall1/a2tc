@@ -164,6 +164,102 @@ def test_negative_index_addresses_from_the_end(act):
     assert penultimate is para.of_kind(Kind.SUBPARAGRAPH)[3]
 
 
+# --------------------------------------------- the act as adopted (sector 3, oj-*)
+
+# Regulation (EU) 2021/1119 as adopted, abridged: Article 1 has no numbered paragraph
+# at all, Article 4 has them with their number opening the text, and a point list in a
+# two-cell table. The `<div id="010A">` is a whole article quoted inside an amendment —
+# the shape that makes heading counts an unusable way to enumerate articles.
+AS_ADOPTED = """
+<html><body>
+<div class="eli-subdivision" id="art_1">
+  <p class="oj-ti-art">Article 1</p>
+  <div class="eli-title"><p class="oj-sti-art">Subject matter and scope</p></div>
+  <p class="oj-normal">This Regulation establishes a framework.</p>
+  <p class="oj-normal">This Regulation sets out a binding objective.</p>
+</div>
+<div class="eli-subdivision" id="art_4">
+  <p class="oj-ti-art">Article 4</p>
+  <div class="eli-title"><p class="oj-sti-art">Intermediate targets</p></div>
+  <div>
+    <p class="oj-normal">1.&#160;&#160;&#160;The binding 2030 target shall be 55 %.</p>
+    <p class="oj-normal">When implementing that target, the institutions shall act.</p>
+  </div>
+  <div>
+    <p class="oj-normal">2.&#160;&#160;&#160;The Commission shall ensure that:</p>
+    <table><tbody><tr>
+      <td><p class="oj-normal">(a)</p></td>
+      <td><p class="oj-normal">the best available evidence is used;</p>
+        <table><tbody><tr>
+          <td><p class="oj-normal">(i)</p></td>
+          <td><p class="oj-normal">including the latest reports;</p></td>
+        </tr></tbody></table>
+      </td>
+    </tr></tbody></table>
+    <table><tbody><tr>
+      <td><p class="oj-normal">(b)</p></td>
+      <td><p class="oj-normal">the social impacts are weighed.</p></td>
+    </tr></tbody></table>
+  </div>
+</div>
+<div class="eli-subdivision" id="art_12">
+  <p class="oj-ti-art">Article 12</p>
+  <div class="eli-title"><p class="oj-sti-art">Amendments</p></div>
+  <div>
+    <p class="oj-normal">1.&#160;&#160;&#160;Regulation (EC) No 401/2009 is amended:</p>
+    <table><tbody><tr>
+      <td><p class="oj-normal">(1)</p></td>
+      <td><p class="oj-normal">the following article is inserted:</p>
+        <div id="010A"><p class="oj-ti-art">'Article 10a</p>
+          <div><p class="oj-normal">1.&#160;&#160;&#160;A Board is established.</p></div>
+        </div>
+      </td>
+    </tr></tbody></table>
+  </div>
+</div>
+</body></html>
+"""
+
+
+def as_adopted() -> Act:
+    return assemble(AS_ADOPTED, "32021R1119", "Regulation (EU) 2021/1119")
+
+
+def test_as_adopted_reads_an_article_with_no_numbered_paragraphs():
+    article = as_adopted().article("1")
+    assert article.title == "Subject matter and scope"
+    assert article.of_kind(Kind.PARAGRAPH) == []
+    assert [n.text for n in article.of_kind(Kind.SUBPARAGRAPH)] == [
+        "This Regulation establishes a framework.",
+        "This Regulation sets out a binding objective.",
+    ]
+
+
+def test_as_adopted_takes_the_paragraph_number_out_of_its_text():
+    """The number opens the text here; the consolidated template gives it an element."""
+    paragraph = as_adopted().article("4").by_key(Kind.PARAGRAPH, "1")
+    assert paragraph is not None
+    assert paragraph.text == ""
+    subparagraphs = paragraph.of_kind(Kind.SUBPARAGRAPH)
+    assert subparagraphs[0].text == "The binding 2030 target shall be 55 %."
+    assert len(subparagraphs) == 2
+
+
+def test_as_adopted_reads_points_and_subpoints_from_tables():
+    paragraph = as_adopted().article("4").by_key(Kind.PARAGRAPH, "2")
+    points = paragraph.of_kind(Kind.POINT)
+    assert [p.key for p in points] == ["a", "b"]
+    assert points[0].text == "the best available evidence is used;"  # not the subpoint's
+    assert [s.key for s in points[0].of_kind(Kind.SUBPOINT)] == ["i"]
+
+
+def test_as_adopted_does_not_invent_articles_from_quoted_amendments():
+    """Article 12 quotes a whole Article 10a; only art_* subdivisions are articles."""
+    act = as_adopted()
+    assert [a.key for a in act.articles] == ["1", "4", "12"]
+    assert "A Board is established." in act.article("12").full_text
+
+
 def test_paragraph_ordinal_reaches_an_article_that_has_no_numbered_paragraphs():
     """"in Article 1, second paragraph" — COM(2025) 524 on the European Climate Law.
 

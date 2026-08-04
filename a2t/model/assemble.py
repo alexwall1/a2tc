@@ -317,6 +317,207 @@ def _assemble_flat(doc, act: Act) -> None:
     flush()
 
 
+# ------------------------------------------------------- the act as adopted (sector 3)
+#
+# An act that has never been amended has no consolidation, so the text in force is the
+# act as adopted. That document uses a parallel vocabulary to the consolidated one —
+# `oj-ti-art` for "Article 4", `oj-sti-art` for its title, `oj-normal` for every block
+# of text, a two-cell table for every point — and keeps the `eli-subdivision` wrappers.
+# Verified across thirteen acts from 2005 to 2023. Acts adopted before roughly 2005 use
+# one of two older templates and are not read here; that costs nothing, because an act
+# old enough to carry them has been amended since and so has a consolidation to work
+# from instead.
+
+# "1.   In order to reach …" — the number opens the paragraph's first block of text
+# rather than sitting in an element of its own, which is the only structural difference
+# from the consolidated template that the vocabulary does not account for.
+OJ_PARAGRAPH_NUMBER = re.compile(r"^(?P<key>\d+(?:-?[a-z]+)?)\.\s+(?P<rest>\S.*)$", re.S)
+
+
+def _oj_point_cells(table) -> list:
+    """The marker cell and body cell of a point, or [] if this is not one.
+
+    Every point inside an article is one row of two cells — all 665 of them across
+    Regulation 2021/1119, Regulation 2018/1999 and Directive 2010/75/EU — so a table
+    shaped otherwise is a data table and not a point at all.
+    """
+    rows = table.xpath("./tbody/tr") or table.xpath("./tr")
+    if len(rows) != 1:
+        return []
+    cells = [c for c in rows[0] if isinstance(c.tag, str) and c.tag == "td"]
+    return cells if len(cells) == 2 else []
+
+
+def _direct_point_tables(el) -> list:
+    """Point tables under `el` that no other point already owns."""
+    out = []
+    for table in el.iter("table"):
+        parent = table.getparent()
+        nested = False
+        while parent is not None and parent is not el:
+            if parent.tag == "table":
+                nested = True
+                break
+            parent = parent.getparent()
+        if not nested and _oj_point_cells(table):
+            out.append(table)
+    return out
+
+
+def _oj_point_parts(table) -> tuple[str | None, str]:
+    """(marker, text) for a point, excluding any sub-points nested inside it."""
+    cells = _oj_point_cells(table)
+    if not cells:
+        return None, ""
+    marker = clean_text(cells[0])
+    match = POINT_MARKER.match(marker)
+    key = match.group("key") if match else (marker.strip("().") or None)
+
+    body = cells[1]
+    nested = _direct_point_tables(body)
+    if not nested:
+        return key, clean_text(body)
+    for sub in nested:
+        sub.getparent().remove(sub)
+    text = clean_text(body)
+    for sub in nested:
+        body.append(sub)
+    return key, text
+
+
+def _add_oj_point(parent: Node, table, kind: Kind) -> None:
+    key, text = _oj_point_parts(table)
+    point = parent.add(Node(kind, key=key, text=text))
+    cells = _oj_point_cells(table)
+    if cells:
+        for nested in _direct_point_tables(cells[1]):
+            _add_oj_point(point, nested, Kind.SUBPOINT)
+
+
+def _oj_paragraph_key(container) -> str | None:
+    """The number the paragraph's first block of text opens with, if any."""
+    for child in container:
+        if (isinstance(child.tag, str) and child.tag == "p"
+                and _has_class(child, "oj-normal")):
+            match = OJ_PARAGRAPH_NUMBER.match(clean_text(child))
+            return match.group("key") if match else None
+    return None
+
+
+def _add_oj_body(target: Node, container, strip_number: bool = False) -> None:
+    """Add the subparagraphs and points inside `container` to `target`.
+
+    In document order and in one pass, for the reason `_add_body` gives: an article
+    that lists points and then refers back to them reads wrongly if the two are
+    collected separately.
+    """
+    opening = strip_number
+    for child in container:
+        if not isinstance(child.tag, str):
+            continue
+        if child.tag == "p" and _has_class(child, "oj-normal"):
+            text = clean_text(child)
+            if opening:
+                match = OJ_PARAGRAPH_NUMBER.match(text)
+                if match:
+                    # The number belongs to the paragraph, which carries it as its key
+                    # the way the consolidated template's `span.no-parag` does. Leaving
+                    # it in the text would print it twice.
+                    text = match.group("rest").strip()
+                opening = False
+            if text:
+                target.add(Node(Kind.SUBPARAGRAPH, text=text))
+        elif child.tag == "table" and _oj_point_cells(child):
+            _add_oj_point(target, child, Kind.POINT)
+
+
+def _populate_article_oj(article: Node, blocks) -> None:
+    current: Node = article  # where loose subparagraphs and points attach
+    for child in blocks:
+        if not isinstance(child.tag, str):
+            continue
+
+        # An unclassed div is one numbered paragraph, holding its own blocks of text.
+        if child.tag == "div" and not (child.get("class") or "").strip():
+            paragraph = article.add(
+                Node(Kind.PARAGRAPH, key=_oj_paragraph_key(child))
+            )
+            _add_oj_body(paragraph, child, strip_number=True)
+            current = paragraph
+            continue
+
+        if child.tag == "p" and _has_class(child, "oj-normal"):
+            text = clean_text(child)
+            if text:
+                current.add(Node(Kind.SUBPARAGRAPH, text=text))
+            continue
+
+        if child.tag == "table" and _oj_point_cells(child):
+            _add_oj_point(current, child, Kind.POINT)
+
+
+def _build_article_oj(subdivision) -> Node | None:
+    """Article from an `art_*` subdivision of the act as adopted.
+
+    The heading has to be a *direct* child. An amending act quotes whole articles of
+    the act it amends inside a point's cell, headings and all: Directive 2008/101/EC
+    carries sixteen `oj-ti-art` headings for the four articles it actually has, and
+    Regulation 2021/1119 seventeen for fourteen. Enumerating articles by their headings
+    would invent them out of quoted text, so they are found by their subdivision — whose
+    id is `art_*` — and read from the top down.
+    """
+    heads = [c for c in subdivision
+             if isinstance(c.tag, str) and _has_class(c, "oj-ti-art")]
+    if not heads:
+        return None
+    match = ARTICLE_NUMBER.match(clean_text(heads[0]))
+    if match is None:
+        return None
+
+    article = Node(Kind.ARTICLE, key=match.group("key").strip(),
+                   source_id=subdivision.get("id"))
+    titles = [c for c in subdivision
+              if isinstance(c.tag, str) and _has_class(c, "eli-title")]
+    if titles:
+        article.title = clean_text(titles[0]) or None
+
+    blocks = [c for c in subdivision if isinstance(c.tag, str)
+              and c not in heads and c not in titles]
+    _populate_article_oj(article, blocks)
+    return article
+
+
+def _assemble_as_adopted(doc, act: Act) -> None:
+    """Assemble an act as adopted, chapters and articles in document order."""
+    ordered = doc.xpath(
+        "//p[contains(@class,'oj-ti-section-1')]"
+        " | //p[contains(@class,'oj-ti-section-2')]"
+        " | //div[contains(@class,'eli-subdivision')]"
+    )
+
+    chapter: Node | None = None
+    for element in ordered:
+        classes = (element.get("class") or "").split()
+        if "oj-ti-section-1" in classes:
+            match = CHAPTER_NUMBER.match(clean_text(element))
+            # Only a chapter heading opens a chapter; `oj-ti-section-1` also marks the
+            # headings of annexes and of the parts a recital block is divided into.
+            chapter = (
+                act.root.add(Node(Kind.CHAPTER, key=match.group("key")))
+                if match else None
+            )
+            continue
+        if "oj-ti-section-2" in classes:
+            if chapter is not None and not chapter.children:
+                chapter.title = clean_text(element) or None
+            continue
+        if not (element.get("id") or "").startswith("art_"):
+            continue
+        article = _build_article_oj(element)
+        if article is not None:
+            (chapter or act.root).add(article)
+
+
 def _wrap(el):
     """Adapter so a lone grid-container can be passed where a container is expected."""
     holder = LH.Element("div")
@@ -356,6 +557,18 @@ def assemble(full_text_html: str, celex: str, title: str,
     # The act's own title is amendable ("the title is replaced by the
     # following"), so the root carries it like any other heading.
     act.root.title = title
+
+    # The act as adopted, rather than a consolidation of it. Probed before the others
+    # because it keeps the `eli-subdivision` wrappers but none of their contents.
+    if doc.find_class("oj-ti-art"):
+        _assemble_as_adopted(doc, act)
+        if not act.articles:
+            raise AssemblyError(
+                f"{celex}: no articles found. The source is the act as adopted "
+                f"({len(doc.find_class('oj-ti-art'))} article headings) but none sits "
+                f"in an art_* subdivision."
+            )
+        return act
 
     if not _article_subdivisions(doc):
         _assemble_flat(doc, act)

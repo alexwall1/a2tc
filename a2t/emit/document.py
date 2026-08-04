@@ -182,12 +182,19 @@ class DocumentEmitter:
             self._account(title_change, block)
         else:
             self.doc.unchanged(self.act.title or self.act.celex, style="OJ Title")
-        version = self.act.version_date or "—"
-        self.doc.unchanged(
-            f"Consolidated text {self.act.celex} (applicable from {version}), "
-            f"shown with the amendments proposed against it as tracked changes.",
-            style="OJ Note",
-        )
+        if self.act.celex.startswith("3"):
+            # Sector 3: the act as adopted, used where nothing had been consolidated by
+            # the proposal date. It has no version date, and a reader who expects a
+            # consolidation should be told which text this is.
+            note = (f"Text of {self.act.celex} as adopted — the act had not been "
+                    f"amended when the proposal was drafted — shown with the "
+                    f"amendments proposed against it as tracked changes.")
+        else:
+            version = self.act.version_date or "—"
+            note = (f"Consolidated text {self.act.celex} (applicable from {version}), "
+                    f"shown with the amendments proposed against it as tracked "
+                    f"changes.")
+        self.doc.unchanged(note, style="OJ Note")
         self.result.paragraphs += 1
 
         # Doubt about *which* text this is belongs next to the text, not only in the

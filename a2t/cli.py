@@ -10,7 +10,7 @@ import click
 from a2t.detect.targets import detect_targets, find_proposal_date
 from a2t.extract.deboilerplate import operative_part
 from a2t.extract.pdf import ExtractionError, LayoutUnavailable, extract_lines
-from a2t.model.assemble import assemble
+from a2t.model.assemble import AssemblyError, assemble
 from a2t.model.reconcile import reconcile
 from a2t.model.tree import Kind
 from a2t.retrieval.base import RetrievalError, title_matches
@@ -445,8 +445,16 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
             failures.append(f"{block.citation}: title mismatch")
             continue
 
-        act = assemble(retrieved.full_text_html, pinned, retrieved.title,
-                       retrieved.version_date)
+        try:
+            act = assemble(retrieved.full_text_html, pinned, retrieved.title,
+                           retrieved.version_date)
+        except AssemblyError as exc:
+            # Acts adopted before roughly 2005 use HTML templates the reader does not
+            # know; that only surfaces here, on the sector-3 path, since every
+            # consolidation is in the current template.
+            click.echo(f"{block.citation}: SKIPPED — {exc}\n")
+            failures.append(f"{block.citation}: {exc}")
+            continue
         resolution = resolve_block(block, act)
         if llm_resolver is not None and resolution.unresolved:
             apply_llm_fallback(resolution, act, llm_resolver)
