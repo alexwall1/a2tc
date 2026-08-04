@@ -276,6 +276,9 @@ class Resolver:
         self.root = Path()
         if root_scope:
             self.root = Path((Step(Kind.ARTICLE, key=root_scope),))
+        # Provisions this proposal inserts, and the node each is placed after. A later
+        # instruction may address one of them, and it exists nowhere else.
+        self._inserted: dict[tuple[Kind, str], Node] = {}
 
     def run(self, block: TargetBlock) -> ResolutionReport:
         report = ResolutionReport()
@@ -361,7 +364,9 @@ class Resolver:
             return
 
         if instruction.op in (Op.INSERT_NODE, Op.APPEND_NODE):
-            report.results.append(self._resolve_insertion(instruction, scoped))
+            result = self._resolve_insertion(instruction, scoped)
+            self._record_insertion(instruction, result)
+            report.results.append(result)
             return
 
         if instruction.target_text and OWN_TITLE.match(instruction.target_text.strip()):
@@ -507,15 +512,57 @@ class Resolver:
             return None
         node = resolve(self._extend(scoped, steps), self.act)
         if node is None:
-            # Routinely because the proposal is inserting that provision too, a few
-            # instructions earlier. Falling through to the number gets the same
-            # answer, since a provision sorts after the one it is placed behind.
+            placed = self._after_an_insertion(instruction, scoped, steps)
+            if placed is not None:
+                return placed
+            # Falling through to the number gets the same answer for an article, since
+            # a provision sorts after the one it is placed behind.
             instruction.note(
                 f"stated position {instruction.anchor_text!r} is not in "
-                f"{self.act.celex} — it may be one this proposal also inserts"
+                f"{self.act.celex} and this proposal does not insert it either"
             )
             return None
         return Resolution(instruction, path=scoped, node=node, status="resolved")
+
+    def _after_an_insertion(self, instruction: Instruction, scoped: Path,
+                            steps: list[Step]) -> Resolution | None:
+        """The stated position is a provision this proposal itself inserts.
+
+        Art. 1(15)(e) adds paragraph 3f "after paragraph 3e" of Article 10a, and 3e is
+        one of the five paragraphs that (d) inserts three lines earlier — the base act
+        stops at paragraph 2. Placed by the container instead, the new paragraph went
+        to the end of Article 10a, twenty paragraphs past where it belongs.
+
+        It goes where the insertion that creates its anchor goes; both are written
+        after that same node, in the order the proposal gives them.
+        """
+        last = steps[-1]
+        if last.key is None:
+            return None
+        anchor = self._inserted.get((last.kind, last.key.lower()))
+        if anchor is None:
+            return None
+        container = resolve(scoped, self.act) if scoped.steps else self.act.root
+        if container is None or not _within(anchor, container):
+            return None
+        instruction.note(
+            f"placed after {anchor.citation}, with the {last.kind.value} "
+            f"{last.key} that this proposal inserts there"
+        )
+        return Resolution(instruction, path=scoped, node=anchor, status="resolved")
+
+    def _record_insertion(self, instruction: Instruction,
+                          result: Resolution) -> None:
+        """Remember what an insertion creates, and where it puts it."""
+        if not result.ok or result.node is None or not instruction.payload:
+            return
+        for provision in structure(instruction.payload,
+                                   instruction.payload_layout,
+                                   instruction.payload_breaks):
+            if provision.key:
+                self._inserted.setdefault(
+                    (provision.kind, provision.key.lower()), result.node
+                )
 
     def _numbered_position(self, instruction: Instruction,
                            scoped: Path) -> Resolution | None:
@@ -571,6 +618,16 @@ class Resolver:
                 reason=f"{path} does not exist in {self.act.celex}",
             )
         return Resolution(instruction, path=path, node=node, status="resolved")
+
+
+def _within(node: Node, container: Node) -> bool:
+    """Is `node` the container itself, or somewhere below it?"""
+    current: Node | None = node
+    while current is not None:
+        if current is container:
+            return True
+        current = current.parent
+    return False
 
 
 def _contains(node: Node, needle: str, title_only: bool = False) -> bool:

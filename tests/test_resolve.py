@@ -212,12 +212,24 @@ def test_new_article_is_placed_by_its_number(resolutions):
 
 def test_position_naming_a_provision_the_proposal_itself_inserts(resolutions):
     """'after Article 3gaa, the following Article 3gab is inserted' — but 3gaa is
-    not in the base act, the instruction before this one inserts it. The number
-    reaches the same place: both land after 3ga, in the order given."""
+    not in the base act, the instruction before this one inserts it. So this one goes
+    where that insertion goes: both land after 3ga, in the order given."""
     result = resolutions["1.6"]
     assert result.ok
     assert result.node.key == "3ga"
-    assert any("also inserts" in note for note in result.instruction.notes)
+    assert any("this proposal inserts there" in note
+               for note in result.instruction.notes)
+
+
+def test_a_paragraph_follows_the_paragraphs_the_proposal_inserts(resolutions):
+    """Art. 1(15)(e) adds paragraph 3f after paragraph 3e of Article 10a, which
+    Art. 1(15)(d) inserts after paragraph 2. The base act stops at paragraph 2, so
+    placing 3f by its container would drop it at the end of the article — after
+    paragraph 22, twenty paragraphs past the run it belongs to."""
+    result = resolutions["1.15.e"]
+    assert result.ok
+    assert result.node.citation.endswith("Article 10a / paragraph 2")
+    assert result.node is resolutions["1.15.d"].node
 
 
 def test_a_stated_position_is_not_second_guessed(resolutions):
