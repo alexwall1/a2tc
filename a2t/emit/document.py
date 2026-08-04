@@ -19,7 +19,7 @@ from a2t.apply.changeset import Change, ChangeKind, ChangeSet
 from a2t.apply.diff import Pair, Span, diff
 from a2t.emit.tracked_docx import Ins, TrackedDocx
 from a2t.extract.preamble import Preamble
-from a2t.model.payload import Provision, printed, structure
+from a2t.model.payload import Provision, marker, printed, structure
 from a2t.model.tree import Act, Kind, Node
 
 def _restates_heading(text: str, key: str | None) -> bool:
@@ -368,7 +368,7 @@ class DocumentEmitter:
             # "after" bracket the whole change; rendering them separately would show
             # the provision twice.
             combined = diff(edits[0].old_text, edits[-1].new_text)
-            block = self.doc.from_spans(self._numbered(combined.spans),
+            block = self.doc.from_spans(self._numbered(combined.spans, node),
                                         style=self._style(node))
             for change in edits:
                 self._account(change, block, count_paragraph=change is edits[0])
@@ -512,14 +512,19 @@ class DocumentEmitter:
         number, self._number = self._number, ""
         return number
 
-    def _numbered(self, spans) -> list:
-        """`spans`, with any waiting paragraph number in front of them.
+    def _numbered(self, spans, node: Node | None = None) -> list:
+        """`spans`, with whatever marks the provision in front of them.
 
         Used where the change touches a phrase inside the provision, which never
-        touches the number: it stands unrevised in front of whatever the edit does.
+        touches its marker: that stands unrevised in front of whatever the edit does.
+        Both a waiting paragraph number and the node's own marker can apply — an
+        amended point (b) opening a numbered paragraph reads "2. (b) …" — and neither
+        is part of the node's text, so an edit built from that text alone drops them.
+        Article 10(2), point (b) of the ETS Directive lost its "(b)" to a sentence
+        added at its end.
         """
-        number = self._take_number()
-        return [Span("equal", number), *spans] if number else list(spans)
+        prefix = self._take_number() + (marker(node) if node is not None else "")
+        return [Span("equal", prefix), *spans] if prefix else list(spans)
 
     def _style(self, node: Node | Provision) -> str:
         if node.kind is Kind.SUBPOINT:

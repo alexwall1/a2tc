@@ -590,6 +590,26 @@ def test_a_phrase_edit_leaves_the_number_alone(tmp_path):
                for s, t in _styled(result.path))
 
 
+def test_an_edited_point_keeps_its_letter(tmp_path):
+    """The letter is outside the point's text, as a paragraph number is outside its
+    own. Art. 1(14)(b) adds a sentence to Article 10(2), point (b) of the ETS
+    Directive, and the point came out with its "(b)" gone."""
+    act = Act(celex="TESTACT", title="Test Directive")
+    article = act.root.add(Node(Kind.ARTICLE, key="10"))
+    paragraph = article.add(Node(Kind.PARAGRAPH, key="2"))
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="Composed as follows:"))
+    point = paragraph.add(Node(Kind.POINT, key="b", text="10 % of the total quantity."))
+    instr = instruction(op=Op.REPLACE_TEXT, find_text="10 %", replace_text="12 %")
+    changeset = ChangeSet(act=act, changes=build_changes(
+        Resolution(instr, node=point, status="resolved")
+    ))
+    result = emit_document(act, changeset, tmp_path / "a.docx")
+
+    assert any(s == "OJ Point" and t.startswith("(b) ")
+               for s, t in _styled(result.path))
+    assert "(b)" not in deleted_texts(load(result.path))
+
+
 # ------------------------------------------------------------------- placement
 
 

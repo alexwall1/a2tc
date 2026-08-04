@@ -80,6 +80,19 @@ class Provision:
         return self.kind is Kind.ARTICLE
 
 
+def marker(block: Node | Provision) -> str:
+    """What stands in front of a provision's own words on the page.
+
+    EUR-Lex keeps it outside them, so it belongs to no text an edit is built from and
+    has to be put back wherever a provision is written.
+    """
+    if block.kind is Kind.PARAGRAPH and block.key:
+        return f"{block.key}. "
+    if block.kind in (Kind.POINT, Kind.SUBPOINT) and block.key:
+        return f"({block.key}) "
+    return ""
+
+
 def printed(block: Node | Provision) -> str:
     """A provision as it appears on the page.
 
@@ -91,11 +104,7 @@ def printed(block: Node | Provision) -> str:
         # An article block with no text of its own is a heading; one carrying text is
         # a provision whose text sits directly under the article, with no paragraph.
         return block.text or (f"Article {block.key}" if block.key else "")
-    if block.kind is Kind.PARAGRAPH and block.key:
-        return f"{block.key}. {block.text}"
-    if block.kind in (Kind.POINT, Kind.SUBPOINT) and block.key:
-        return f"({block.key}) {block.text}"
-    return block.text
+    return f"{marker(block)}{block.text}"
 
 
 def opening_number(node: Node) -> str:
