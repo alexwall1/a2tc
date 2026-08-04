@@ -444,6 +444,11 @@ def _extract_payload(
     # Trailing "’;" / "’." / "’" — the closing quote plus the instruction's own
     # punctuation. Quote counting cannot be used: apostrophes share the character.
     text = re.sub(rf"[{CLOSE_QUOTE}\u201d]\s*[;.]?\s*$", "", text).strip()
+    # A drafter who omits the closing quote altogether leaves their own separator
+    # standing inside the quoted text: Art. 1(14)(a) ends "\u2026 paragraph 2 of this
+    # Article.;". A sentence of legislation never ends that way, so the semicolon is
+    # the instruction speaking, not the provision.
+    text = re.sub(r"(?<=\.);$", "", text)
 
     # Each note opens on a line of its own, with its marker. Splitting the block after
     # joining it cannot see that: the second note's marker is "**", and a rule looking
