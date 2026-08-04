@@ -95,14 +95,24 @@ _ANCHOR_WHERE = {
     "in the beginning of": "before",
 }
 
+# "the following sentence is added to point (b)" — ETS proposal, Article 1(14)(b) —
+# names the provision the sentence joins rather than one it follows. That reads as a
+# position only because a sentence added to a provision goes at the end of it, so it
+# is taken as one only for a sentence: "the following points are added to paragraph 3"
+# says where the new points live, which is a different question.
+_SENTENCE_ANCHOR_WHERE = {"to": "after", "at the end of": "after"}
+
 
 def _record_anchor(instruction: Instruction, where: str | None, anchor: str) -> None:
     """Keep a stated insertion position, and say so in the notes either way."""
     where = re.sub(r"\s+", " ", (where or "after")).strip().lower()
     anchor = anchor.strip().rstrip(":;,. ")
     instruction.note(f"insert {where} {anchor}")
-    if where in _ANCHOR_WHERE and anchor:
-        instruction.anchor_where = _ANCHOR_WHERE[where]
+    known = dict(_ANCHOR_WHERE)
+    if instruction.adds_a_sentence:
+        known.update(_SENTENCE_ANCHOR_WHERE)
+    if where in known and anchor:
+        instruction.anchor_where = known[where]
         instruction.anchor_text = anchor
 
 

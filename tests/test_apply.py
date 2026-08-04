@@ -22,6 +22,8 @@ from a2t.extract.pdf import extract_lines
 from a2t.model.assemble import assemble
 from a2t.model.instruction import Instruction, Op
 from a2t.model.payload import Provision, from_node, opening_number, structure
+from a2t.model.path import Path as NodePath
+from a2t.model.path import Step, resolve
 from a2t.model.tree import Act, Kind, Node
 from a2t.parse.rules import classify_all
 from a2t.parse.segment import segment
@@ -241,6 +243,86 @@ def test_payload_split_refused_when_text_precedes_the_first_number():
     payload = ("Article 2 1. The first paragraph, which is lost. "
                "2. The second. 3. The third.")
     assert split_enumerated_payload(payload, ["2", "3"]) is None
+
+
+# --------------------------------------------------- a sentence added to a provision
+
+
+def sentence_act() -> Act:
+    """Article 1 with an unnumbered block, and a paragraph whose text is in blocks."""
+    act = Act(celex="TEST", title="t")
+    one = act.root.add(Node(Kind.ARTICLE, key="1"))
+    one.add(Node(Kind.SUBPARAGRAPH, text="The first block. It has two sentences."))
+    two = act.root.add(Node(Kind.ARTICLE, key="2"))
+    paragraph = two.add(Node(Kind.PARAGRAPH, key="2"))
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="The opening block."))
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="The closing block."))
+    return act
+
+
+def test_an_added_sentence_extends_the_provision_it_is_added_to():
+    """COM(2025) 524: written as an insertion it became a paragraph of its own."""
+    act = sentence_act()
+    node = act.article("1").of_kind(Kind.SUBPARAGRAPH)[0]
+    instr = instruction(Op.APPEND_NODE, target_text="sentence",
+                        payload="A third sentence.")
+    change = build_changes(Resolution(instr, node=node, status="resolved"))[0]
+
+    assert change.kind is ChangeKind.TEXT_EDIT
+    assert change.node is node
+    assert change.new_text == "The first block. It has two sentences. A third sentence."
+
+
+def test_an_added_sentence_lands_in_the_block_that_ends_the_provision():
+    """A numbered paragraph has no words of its own; its last block ends it."""
+    act = sentence_act()
+    paragraph = act.article("2").by_key(Kind.PARAGRAPH, "2")
+    instr = instruction(Op.APPEND_NODE, target_text="sentence",
+                        payload="An added sentence.")
+    change = build_changes(Resolution(instr, node=paragraph, status="resolved"))[0]
+
+    assert change.node is paragraph.of_kind(Kind.SUBPARAGRAPH)[1]
+    assert change.new_text == "The closing block. An added sentence."
+
+
+def test_a_sentence_added_in_the_beginning_opens_the_provision():
+    act = sentence_act()
+    paragraph = act.article("2").by_key(Kind.PARAGRAPH, "2")
+    instr = instruction(Op.APPEND_NODE, target_text="sentence",
+                        payload="An opening sentence.", anchor_where="before",
+                        anchor_text="paragraph 2")
+    change = build_changes(Resolution(instr, node=paragraph, status="resolved"))[0]
+
+    assert change.node is paragraph.of_kind(Kind.SUBPARAGRAPH)[0]
+    assert change.new_text == "An opening sentence. The opening block."
+
+
+def test_a_sentence_added_after_another_goes_beside_it_not_at_the_end():
+    """'inserted after the first sentence' — the block has a second one after it."""
+    act = sentence_act()
+    block = act.article("1").of_kind(Kind.SUBPARAGRAPH)[0]
+    first = resolve(NodePath((Step(Kind.SENTENCE, index=1),)), block)
+    instr = instruction(Op.INSERT_NODE, target_text="sentence",
+                        payload="An inserted sentence.", anchor_where="after",
+                        anchor_text="the first sentence")
+    change = build_changes(Resolution(instr, node=first, status="resolved"))[0]
+
+    assert change.kind is ChangeKind.TEXT_EDIT
+    assert change.node is block
+    assert change.new_text == (
+        "The first block. An inserted sentence. It has two sentences."
+    )
+
+
+def test_provisions_added_are_still_blocks_of_their_own():
+    act = sentence_act()
+    node = act.article("1")
+    instr = instruction(Op.APPEND_NODE, target_text="points",
+                        payload="(a) a new point.")
+    change = build_changes(Resolution(instr, node=node, status="resolved"))[0]
+
+    assert change.kind is ChangeKind.INSERT
+    assert change.anchor is node
 
 
 def test_leading_split_leaves_the_provisions_the_payload_never_reaches():

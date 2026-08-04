@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+
+# "the following sentence is added", "the following sentences are inserted".
+SENTENCE_ADDED = re.compile(r"^(?:new\s+)?sentences?\b", re.I)
 
 
 class Op(str, Enum):
@@ -57,6 +61,18 @@ class Instruction:
     @property
     def is_container(self) -> bool:
         return self.op is Op.CONTAINER
+
+    @property
+    def adds_a_sentence(self) -> bool:
+        """The thing added is a sentence, so it extends a provision's words.
+
+        Everything else an amendment adds — a point, a paragraph, an article — becomes
+        a provision of its own. A sentence does not: it joins the text already there,
+        and written as a block it would leave the provision it belongs to unchanged and
+        an orphan paragraph beside it.
+        """
+        return (self.op in (Op.INSERT_NODE, Op.APPEND_NODE)
+                and bool(SENTENCE_ADDED.match((self.target_text or "").strip())))
 
     def walk(self):
         yield self

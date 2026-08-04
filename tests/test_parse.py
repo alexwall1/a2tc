@@ -179,6 +179,23 @@ def test_positional_append_records_anchor(by_id):
     assert any("after the second subparagraph" in n for n in instruction.notes)
 
 
+def test_a_sentence_added_to_a_provision_takes_it_as_the_position():
+    """'added to point (b)' names the provision the sentence joins, at its end."""
+    instruction = make("the following sentence is added to point (b):")
+    assert instruction.adds_a_sentence
+    assert instruction.anchor_where == "after"
+    assert instruction.anchor_text == "point (b)"
+
+
+def test_provisions_added_to_a_provision_do_not():
+    """'the following points are added to paragraph 3' says where they live, which is
+    a different question, so it is left to the ordinary reading."""
+    instruction = make("the following points are added to paragraph 3:")
+    assert not instruction.adds_a_sentence
+    assert instruction.anchor_where is None
+    assert any("insert to paragraph 3" in n for n in instruction.notes)
+
+
 # ---------------------------------------------------------------- source defects
 
 

@@ -245,6 +245,60 @@ def _rebase_sentence(sentence: Node, replacement: str) -> tuple[Node, str, str] 
     return holder, holder.text, holder.text.replace(sentence.text, replacement, 1)
 
 
+def _edge_text_node(node: Node, last: bool) -> Node | None:
+    """The provision whose own words begin or end `node`.
+
+    A numbered paragraph keeps its number outside its words and its text in child
+    subparagraphs, so a sentence added to "paragraph 2" belongs to the last of those.
+    The paragraph node itself has no text at all to add it to.
+    """
+    holders = [n for n in node.walk() if n.text]
+    if not holders:
+        return None
+    return holders[-1] if last else holders[0]
+
+
+def _added_sentence(instruction: Instruction, node: Node, payload: str,
+                    texts: dict[int, str] | None = None) -> Change:
+    """A sentence added to a provision, expressed as an edit of that provision.
+
+    "in Article 1, second paragraph, the following sentence is added" — COM(2025) 524.
+    Built as an insertion the sentence became a paragraph of its own, so accepting the
+    change gave Article 1 four paragraphs where the amendment gives it three, and the
+    paragraph the sentence belongs to read as though nothing had happened to it.
+    """
+    before = instruction.anchor_where == "before"
+
+    if node.kind is Kind.SENTENCE:
+        # Anchored on a sentence — "inserted after the first sentence" — so the new one
+        # goes beside it, inside the provision holding both.
+        joined = f"{payload} {node.text}" if before else f"{node.text} {payload}"
+        rebased = _rebase_sentence(node, joined)
+        if rebased is None:
+            return Change(ChangeKind.SKIPPED, instruction, node=node,
+                          note="the sentence it is added to could not be located "
+                               "in its provision")
+        holder = rebased[0]
+        old = _current(texts, holder)
+        if node.text not in old:
+            return Change(ChangeKind.SKIPPED, instruction, node=holder,
+                          note="the sentence it is added to is no longer present")
+        new_text = old.replace(node.text, joined, 1)
+    else:
+        holder = _edge_text_node(node, last=not before)
+        if holder is None:
+            return Change(ChangeKind.SKIPPED, instruction, node=node,
+                          note="no text in this provision to add a sentence to")
+        old = _current(texts, holder)
+        new_text = f"{payload} {old}" if before else f"{old} {payload}"
+
+    _remember(texts, holder, new_text)
+    return Change(
+        ChangeKind.TEXT_EDIT, instruction, node=holder,
+        old_text=old, new_text=new_text, edit=diff(old, new_text),
+    )
+
+
 def _text_edit(instruction: Instruction, node: Node, replacement: str,
                texts: dict[int, str] | None = None) -> Change:
     """A phrase inside a provision changes; everything around it is untouched.
@@ -496,6 +550,8 @@ def build_changes(resolution: Resolution,
             if not new:
                 changes.append(Change(ChangeKind.SKIPPED, instruction, anchor=node,
                                       note="insertion carries no text"))
+            elif instruction.adds_a_sentence:
+                changes.append(_added_sentence(instruction, node, new, texts))
             else:
                 changes.append(Change(
                     ChangeKind.INSERT, instruction, anchor=node,
