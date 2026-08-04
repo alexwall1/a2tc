@@ -21,10 +21,15 @@ ABBREVIATIONS = {
 }
 
 # A candidate boundary: terminator, whitespace, then something that can open a
-# sentence. Quotes and brackets are common openers in legislation.
-_BOUNDARY = re.compile(r"(?<=[.!?])\s+(?=[A-Z‘“\"(‘“])")
+# sentence. Quotes and brackets are common openers in legislation, and so are
+# figures: Article 3ga(3) of Directive 2003/87/EC ends on "50 % of the quantity of
+# allowances shall be distributed among the relevant Member States …", which made
+# "the penultimate sentence" of that subparagraph resolve one sentence too early.
+_BOUNDARY = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9‘“\"(])")
 
 _TRAILING_TOKEN = re.compile(r"([A-Za-z.]+)\.$")
+
+_HAS_LETTER = re.compile(r"[^\W\d_]")
 
 
 def _ends_with_abbreviation(chunk: str) -> bool:
@@ -38,6 +43,19 @@ def _ends_with_abbreviation(chunk: str) -> bool:
 def _ends_mid_citation(chunk: str) -> bool:
     """A dangling opener means the terminator sits inside a citation or aside."""
     return chunk.count("(") > chunk.count(")")
+
+
+def _is_letterless(chunk: str) -> bool:
+    """A chunk of bare figures is not a sentence.
+
+    Admitting figures as openers exposes the base act's own footnote references:
+    `clean_text` leaves the superscript adrift, so 27 nodes of the consolidated ETS
+    Directive end on "… in accordance with State aid rules. 13". Every such stray in
+    the two cached acts is a trailing marker rather than text, so it belongs to the
+    sentence it followed and must not become one of its own — counting it would move
+    every ordinal after it.
+    """
+    return not _HAS_LETTER.search(chunk)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -55,7 +73,9 @@ def split_sentences(text: str) -> list[str]:
     sentences: list[str] = []
     for part in parts:
         if sentences and (
-            _ends_with_abbreviation(sentences[-1]) or _ends_mid_citation(sentences[-1])
+            _ends_with_abbreviation(sentences[-1])
+            or _ends_mid_citation(sentences[-1])
+            or _is_letterless(part)
         ):
             sentences[-1] = f"{sentences[-1]} {part}"
         else:

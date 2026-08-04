@@ -342,6 +342,25 @@ def test_does_not_split_inside_unclosed_parenthesis():
     assert len(split_sentences(text)) == 2
 
 
+def test_splits_before_a_sentence_opening_on_a_figure():
+    # Article 3ga(3) of Directive 2003/87/EC: its last sentence opens on "50 %", and
+    # a proposal addressing "the penultimate sentence" means the one before it.
+    text = (
+        "The revenue generated from the auctioning of that share of allowances should "
+        "be used for the purposes referred to in Article 10(3). 50 % of the quantity "
+        "of allowances shall be distributed among the relevant Member States."
+    )
+    sentences = split_sentences(text)
+    assert len(sentences) == 2
+    assert sentences[-1].startswith("50 %")
+
+
+def test_does_not_split_off_a_stray_footnote_marker():
+    # What clean_text leaves behind of the base act's own footnote references.
+    text = "Allowances shall be allocated in accordance with State aid rules. 13"
+    assert len(split_sentences(text)) == 1
+
+
 def test_sentence_addressing_on_real_text(act):
     para = act.article("10b").by_key(Kind.PARAGRAPH, "1")
     second = resolve(NodePath((Step(Kind.SENTENCE, index=2),)), para)
