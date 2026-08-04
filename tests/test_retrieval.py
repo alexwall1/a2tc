@@ -8,8 +8,8 @@ from datetime import date
 import pytest
 
 from a2t.detect.celex import parse_citation
-from a2t.retrieval.acquire import Acquisition
-from a2t.retrieval.base import RetrievedAct, title_matches
+from a2t.retrieval.acquire import Acquisition, acquire
+from a2t.retrieval.base import RetrievalError, RetrievedAct, title_matches
 from a2t.retrieval.eurlex_builder import build_config
 from a2t.retrieval.versions import (
     Version, VersionError, list_versions, parse_pinned, publication_warning,
@@ -145,6 +145,72 @@ def test_acquisition_keeps_warnings_separable():
     assert Acquisition(act, "x", "x").warning is None
     both = Acquisition(act, "x", "y", ("not yet published", "no English text"))
     assert both.warning.splitlines() == ["not yet published", "no English text"]
+
+
+class _Provider:
+    """Fetches only the versions it was told have English text."""
+
+    def __init__(self, *usable: str):
+        self.usable = set(usable)
+        self.tried: list[str] = []
+
+    def fetch(self, celex: str) -> RetrievedAct:
+        self.tried.append(celex)
+        if celex not in self.usable:
+            raise RetrievalError(f"no content for {celex}")
+        return RetrievedAct(celex, "Regulation (EU) 2021/1119", "<p/>", None)
+
+
+def _versions(monkeypatch, *starts):
+    monkeypatch.setattr(
+        "a2t.retrieval.versions.list_version_records",
+        lambda base, timeout=90: tuple(Version(s) for s in starts),
+    )
+
+
+def test_substitution_goes_backwards_never_forwards(monkeypatch):
+    """A later consolidation is nearer in days but holds changes the drafters lacked."""
+    _versions(monkeypatch, date(2013, 7, 1), date(2015, 10, 29), date(2016, 3, 1))
+    provider = _Provider("02003L0087-20130701", "02003L0087-20160301")
+
+    acquired = acquire(provider, "02003L0087", date(2016, 1, 1))
+
+    assert acquired.requested == "02003L0087-20151029"
+    assert acquired.pinned == "02003L0087-20130701"  # not the nearer 2016 one
+    assert "which is earlier" in acquired.warning
+    assert "02003L0087-20160301" not in provider.tried
+
+
+def test_only_later_consolidations_falls_back_to_the_act_as_adopted(monkeypatch):
+    """COM(2025) 524: the ECL was first consolidated in 2026, after its own adoption.
+
+    The 2026 consolidation carries the proposal's own enacted amendments, so it is
+    never used; the text in force in 2025 was the act as adopted.
+    """
+    _versions(monkeypatch, date(2021, 7, 9), date(2026, 4, 7))
+    provider = _Provider("02021R1119-20260407", "32021R1119")
+
+    acquired = acquire(provider, "02021R1119", date(2025, 7, 2))
+
+    assert acquired.pinned == "32021R1119"
+    assert acquired.substituted
+    assert "had not been amended" in acquired.warning
+    assert "02021R1119-20260407" not in provider.tried
+
+
+def test_error_when_neither_a_consolidation_nor_the_act_as_adopted_can_be_had(
+    monkeypatch,
+):
+    _versions(monkeypatch, date(2021, 7, 9), date(2026, 4, 7))
+    provider = _Provider("02021R1119-20260407")  # sector 3 unavailable too
+
+    with pytest.raises(RetrievalError) as excinfo:
+        acquire(provider, "02021R1119", date(2025, 7, 2))
+
+    message = str(excinfo.value)
+    assert "02021R1119-20210709" in message
+    assert "32021R1119" in message
+    assert "2026-04-07" in message
 
 
 def test_list_versions_derives_start_dates_from_records(monkeypatch):
