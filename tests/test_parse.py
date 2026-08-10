@@ -336,6 +336,22 @@ def test_a_payload_is_not_cut_above_its_own_footnotes(by_id):
     assert "repealing certain Directives" in instruction.footnotes[0]
 
 
+def test_a_note_between_two_inserted_articles_ends_at_the_next_one(by_id):
+    """Art. 1(17) inserts Articles 10cb to 10ce and cites a source in 10cb(6).
+
+    The note is printed at the foot of 10cb, so its rule falls in the middle of the
+    payload. Reading everything below that rule as the note swallowed Articles 10cc,
+    10cd and 10ce into a single 14 000-character footnote.
+    """
+    instruction = by_id["1.17"]
+    assert len(instruction.footnotes) == 1
+    assert instruction.footnotes[0].endswith("innovation activities.]")
+    assert "Industrial Decarbonisation Bank" not in instruction.footnotes[0]
+    for article in ("Article 10cb", "Article 10cc", "Article 10cd", "Article 10ce"):
+        assert article in instruction.payload
+    assert instruction.payload.endswith("Regulation (EU, Euratom) 2024/2509.")
+
+
 def test_payload_opened_with_an_apostrophe_is_still_quoted(by_id):
     """Art. 1(7)(c) and (d) open their payload with ' and close it with ’."""
     for ident in ["1.7.c", "1.7.d"]:

@@ -26,6 +26,7 @@ from a2t.detect.targets import ANCHOR
 from a2t.detect.celex import parse_citation
 from a2t.extract.pdf import Line
 from a2t.model.instruction import Instruction, Op, TargetBlock
+from a2t.model.payload import ARTICLE_HEADING
 
 MARKER = re.compile(r"^\((?P<marker>[0-9]{1,2}|[a-z]{1,3}|[ivxl]{1,5})\)\s*(?P<rest>.*)$")
 
@@ -394,6 +395,42 @@ def _notes_start(lines: list[Line]) -> int | None:
     )
 
 
+def _notes_end(lines: list[Line], start: int) -> int:
+    """Where the notes opening at `start` stop and the legislation resumes.
+
+    A note is printed at the foot of the provision that cites it, so a payload
+    inserting more than one article carries its notes *between* them. Article 1(17) of
+    COM(2026) 616 final inserts Articles 10cb to 10ce, and the note cited in 10cb(6)
+    stands below 10cb's last paragraph, above the heading of 10cc. Reading everything
+    below the rule as notes takes three whole articles into the footnote with it.
+
+    The heading of the next article is what ends the block: it stands alone on its
+    line, and nothing in a note does — a note's continuation lines carry the source's
+    title, its OJ reference and its ELI, never the bare words "Article 10cc".
+    """
+    for index in range(start, len(lines)):
+        if ARTICLE_HEADING.match(lines[index].stripped):
+            # Blank lines between the notes and the heading are the payload's own
+            # spacing; leaving them in the note block would lose a paragraph break.
+            while index > start and lines[index - 1].blank:
+                index -= 1
+            return index
+    return len(lines)
+
+
+def _split_notes(lines: list[Line]) -> tuple[list[Line], list[Line]]:
+    """Separate a payload's footnote blocks from the legislation around them."""
+    start = _notes_start(lines)
+    if start is None:
+        return lines, []
+    # The rule is not part of a note; a marker line is the first line of one.
+    opens = PAYLOAD_RULE.match(lines[start].text) is not None
+    end = _notes_end(lines, start + 1)
+    body, further = _split_notes(lines[end:])
+    return (lines[:start] + body,
+            lines[start + (1 if opens else 0):end] + further)
+
+
 def _drop_early_closes(lines: list[Line]) -> list[Line]:
     """Take out a closing quote the payload was found to continue past.
 
@@ -426,13 +463,7 @@ def _extract_payload(
     the line spacing still record. See `a2t.model.payload`.
     """
     lines = _drop_early_closes(_truncate_at_close(lines))
-    start = _notes_start(lines)
-    if start is None:
-        body, footnote_lines = lines, []
-    else:
-        # The rule is not part of a note; a marker line is the first line of one.
-        opens = PAYLOAD_RULE.match(lines[start].text) is not None
-        body, footnote_lines = lines[:start], lines[start + (1 if opens else 0):]
+    body, footnote_lines = _split_notes(lines)
 
     text = " ".join(line.stripped for line in body).strip()
     text = re.sub(r"\s+", " ", text)
