@@ -9,11 +9,11 @@
 </head>
 <body>
   <main class="container">
-    {% if auth_enabled or session.get("role") == "admin" %}
+    {% if session.get("authenticated") %}
     <nav class="topnav">
       <a href="{{ url_for('index') }}">Upload</a>
       {% if session.get("role") == "admin" %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
-      {% if session.get("authenticated") %}<a href="{{ url_for('logout') }}">Log out</a>{% endif %}
+      <a href="{{ url_for('logout') }}">Log out</a>
     </nav>
     {% endif %}
     {% block content %}{% endblock %}

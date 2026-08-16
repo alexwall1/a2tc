@@ -154,10 +154,21 @@ input[type="file"] {
   max-width: 24rem;
 }
 
+.login-form label {
+  display: block;
+  margin-top: 0.75rem;
+  font-weight: 600;
+}
+
+.login-form input[type="text"],
 .login-form input[type="password"] {
   width: 100%;
   padding: 0.4rem;
   margin-top: 0.25rem;
+}
+
+.login-form button {
+  margin-top: 1rem;
 }
 
 .joblog {
