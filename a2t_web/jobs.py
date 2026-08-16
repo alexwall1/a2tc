@@ -3,6 +3,10 @@
 The registry is the single source of truth for job state. The worker mutates
 state only through these methods; reads copy the relevant fields under the
 same lock so status polls never see a torn transition.
+
+When constructed with a ``Database``, the registry mirrors every job create
+and every terminal transition into the SQLite ``jobs`` table so the admin
+log survives restarts and registry sweeps; without one it writes nothing.
 """
 
 from __future__ import annotations
@@ -13,8 +17,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from a2t_web.joblog import append_log, create_record, terminal_record
+if TYPE_CHECKING:
+    from a2t_web.db import Database
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -42,26 +48,34 @@ class Job:
 
 
 class JobRegistry:
-    def __init__(self, log_path: Path | None = None) -> None:
+    def __init__(self, db: Database | None = None) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, Job] = {}
-        self._log_path = log_path
+        self._db = db
 
-    def _log_event(self, job: Job, record: dict) -> None:
-        """Persist one job-log record when a log path is configured.
+    def _persist(self, job: Job) -> None:
+        """Mirror one state change into SQLite when a database is configured.
 
-        Called while holding ``self._lock`` so appends cannot interleave with
+        Called while holding ``self._lock`` so writes cannot interleave with
         other state mutations; the record is built after the mutation so it
-        carries the authoritative status/timestamps.
+        carries the authoritative status/timestamps. Only the create and
+        terminal states are stored: RUNNING transitions are not persisted
+        (kept small, mirrors the old joblog contract).
         """
-        if self._log_path is not None:
-            append_log(self._log_path, record)
+        if self._db is None:
+            return
+        if job.status in TERMINAL_STATUSES:
+            self._db.set_job_terminal(
+                job.id, job.status, job.error, job.started_at, job.finished_at
+            )
+        else:
+            self._db.insert_job(job)
 
     def create(self, job_id: str, pdf_path: Path, outdir: Path, pdf_name: str) -> Job:
         job = Job(id=job_id, pdf_path=pdf_path, outdir=outdir, pdf_name=pdf_name)
         with self._lock:
             self._jobs[job_id] = job
-            self._log_event(job, create_record(job))
+            self._persist(job)
         return job
 
     def get(self, job_id: str) -> Job | None:
@@ -89,8 +103,9 @@ class JobRegistry:
     ) -> None:
         """Move a job to `status`, setting `error` and timestamps as appropriate.
 
-        Only terminal transitions are logged (running is not) so the durable
-        log stays small and matches the "create and terminal" contract.
+        Only terminal transitions are persisted (running is not) so the
+        durable record stays small and matches the "create and terminal"
+        contract.
         """
         with self._lock:
             job = self._jobs.get(job_id)
@@ -104,7 +119,7 @@ class JobRegistry:
                 job.started_at = now
             if status in TERMINAL_STATUSES:
                 job.finished_at = now
-                self._log_event(job, terminal_record(job))
+                self._persist(job)
 
     def finalize(self, job_id: str, *, status: str, error: str | None = None) -> str:
         """Write a terminal state unless the worker already recorded one.
@@ -113,7 +128,7 @@ class JobRegistry:
         transition happened, otherwise the terminal state already on the job.
         Never moves a job away from a terminal state, so a late cancel cannot
         hide a finished job's artifacts. The early-return for an already
-        terminal job logs nothing, so a late cancel cannot double-log.
+        terminal job persists nothing, so a late cancel cannot double-write.
         """
         with self._lock:
             job = self._jobs.get(job_id)
@@ -125,7 +140,7 @@ class JobRegistry:
             if error is not None:
                 job.error = error
             job.finished_at = time.time()
-            self._log_event(job, terminal_record(job))
+            self._persist(job)
             return status
 
     def position(self, job_id: str) -> int | None:

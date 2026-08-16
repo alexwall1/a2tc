@@ -27,6 +27,7 @@ web = ["flask>=3.0"]
 [project.scripts]
 a2t = "a2t.cli:main"
 a2t-web = "a2t_web.app:main"
+a2t-web-users = "a2t_web.users:main"
 
 [tool.setuptools.packages.find]
 include = ["a2t*"]

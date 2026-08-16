@@ -1,817 +1,482 @@
-# Implementation Plan: password gate (user + admin) and durable /admin job log
+# Implementation Plan: username/password login with SQLite user store and durable job history
 
-This plan adds two features to the existing self-hosted Flask web app:
+This plan replaces the current password-only auth and the TSV `jobs.log` with:
 
-1. A **simple password gate** for the whole app: the operator puts a user
-   password in `.secrets/user-password` and an admin password in
-   `.secrets/admin-password`; the app enforces a login session on all pages
-   **and** the JSON API. The same login form accepts either password and stores
-   the role (`user` | `admin`) in the Flask session cookie. `/admin` requires
-   role `admin`.
-2. A **server-rendered admin page at `GET /admin`** showing a durable,
-   append-only log of every job that has been run (id, PDF filename, status,
-   created/started/finished timestamps, error) that survives restarts.
+1. **Username + password login** backed by an SQLite `users` table (roles: `user` / `admin`).
+2. **An SQLite persistence layer** (`a2t_web/db.py`, stdlib `sqlite3`, no new dependencies)
+   storing users and the job history.
+3. **Historical jobs that survive restarts**: every job create and every terminal
+   transition (DONE/FAILED/CANCELLED) is written to SQLite; `/admin` renders from
+   SQLite instead of the TSV job log.
 
-Design only. The implementer executes the steps in **Implementation sequence**.
-No new dependencies (no flask-login, no flask-httpauth — the `web` extra stays
-`flask>=3.0` only). Existing endpoints and tests stay intact: when **no
-password is configured** the app runs in an open "dev mode" identical to today,
-so the 40+ existing `tests/test_web_app.py` tests pass unchanged.
+The in-memory `JobRegistry` stays as the live runtime store (queue/status polls/status
+page). Only the durable record moves from `joblog.py` (TSV) to `db.py` (SQLite).
 
 ---
 
-## 1. Objective
+## Objective
 
-1. **Auth mechanism**: Flask's built-in signed session cookie
-   (`session`) + a `before_request` guard. `app.secret_key` is a random
-   per-process value (`secrets.token_hex(32)`) unless `A2T_WEB_SECRET_KEY` is
-   set. A `GET /login` form accepts **either** the user password (role
-   `user`) or the admin password (role `admin`), compared in constant time with
-   `hmac.compare_digest`, and stores `session["authenticated"]` +
-   `session["role"]`. `GET /logout` clears the session. `POST /login`
-   redirects to a validated `next` parameter or `/`.
-2. **Enforcement scope**: enforced **only when a password is configured**
-   (`bool(user_password or admin_password)`). In open mode there is no guard
-   and no usable login page. When enabled:
-   - `/api/*` without a session → `401` JSON via the existing `api_error`.
-   - any other page (including `/admin`) without a session → `302` to
-     `/login?next=<path>`.
-   - `/static`, `/login`, `/logout` are exempt.
-   - `/admin` additionally requires `session["role"] == "admin"`; a logged-in
-     `user` gets `403`.
-3. **Durable job log**: a tab-separated append-only file at
-   `<data_dir>/jobs.log`. `JobRegistry.create` appends a "create" record;
-   every terminal transition (`DONE`/`FAILED`/`CANCELLED`) through
-   `transition`/`finalize` appends a "terminal" record. `GET /admin` renders
-   the file contents (one row per job, newest first, capped at 200), surviving
-   restarts and even `sweep`-deleted jobs.
-4. **Secrets hygiene**: passwords are read only from the secrets dir
-   (`A2T_WEB_SECRETS_DIR`, default `.secrets`) at startup; missing or
-   empty-after-trim files **fail closed with a clear `ValueError`**. `.secrets/`
-   is added to `.gitignore`. Passwords never appear in HTML, logs, or error
-   messages.
-
-Non-goals: no user management, no registration, no hashing/DB, no
-remember-me, no API tokens, no LDAP/SSO, no live in-memory registry view on
-`/admin` (the durable file is authoritative), no JS changes (the existing
-polling code already tolerates non-ok `/api` responses).
+- Change authentication from "password only" to "username + password", with users
+  stored in SQLite (normal `user` and `admin` roles) instead of two plaintext
+  password files compared with `hmac.compare_digest`.
+- Add a stdlib `sqlite3` backend under `settings.data_dir` that stores users and
+  job history.
+- Replace the TSV `jobs.log` registry persistence with SQLite writes; `/admin`
+  renders history from SQLite so it survives restarts and registry sweeps.
+- Deprecate `.secrets/user-password` / `.secrets/admin-password`; seed the first
+  admin/user from environment variables on first run, with a small CLI as backup.
 
 ---
 
-## 2. Current system (facts verified from the code)
+## Current system
 
-- `a2t_web/config.py`: frozen `WebSettings` dataclass (data_dir,
-  max_upload_bytes, cache_dir, max_workers, job_timeout, job_ttl_hours,
-  poll_seconds, host, port) + `settings_from_env()` reading `A2T_WEB_*`/`A2T_CACHE`.
-  `_INT_FIELDS` = int-coerced keys; `_ENV_FOR` maps key→env var; `max_workers>1`
-  raises. **No secrets handling today.**
-- `a2t_web/app.py`: `create_app(settings=None)` → `ensure_data_dirs`, `Flask`,
-  `JobRegistry()` (no args), `Worker(registry, settings)`, filters
-  (`basename`, `human_ts`). Routes: `GET /` (`index`), `POST /jobs`
-  (`upload`), `GET /jobs/<id>` (`status`), `GET /api/jobs/<id>` (`api_status`),
-  `GET /api/jobs/<id>/artifacts/<name>` (`artifact`), `POST /api/jobs/<id>/cancel`
-  (`cancel_api`), `GET /api/jobs/<id>/log` (`job_log`), `GET /api/jobs/<id>/report`
-  (`report_api`), `errorhandler(413)`. Errors via `api_error(message, status)`
-  (JSON). `main()` calls `settings_from_env()` + `create_app` + `app.run`.
-  No `session`, no `secret_key`, no `before_request`.
-- `a2t_web/jobs.py`: `Job` dataclass (id, pdf_path, outdir, pdf_name, status,
-  error, created_at, started_at, finished_at, proc, cancelled);
-  `JobRegistry` with `_lock`, `_jobs`; `create`, `get`, `state_snapshot`,
-  `transition`, `finalize`, `position`, `set_proc`, `was_cancelled`,
-  `request_cancel`, `active_procs`, `job_dir`, `sweep`. `finalize` refuses to
-  overwrite a terminal state. `JobRegistry()` is constructed with **no args**
-  in `create_app` and in every `test_web_jobs.py` test.
-- `a2t_web/worker.py`: `Worker._run` drives the lifecycle:
-  `transition(RUNNING)` then `finalize(CANCELLED|DONE|FAILED)`.
-  `Worker.cancel` calls `request_cancel` + `finalize(CANCELLED)`.
-  `_failure_error` returns the log tail (can contain newlines).
-- `a2t_web/storage.py`: `ensure_data_dirs` creates `uploads/` + `jobs/` only.
-  `safe_basename` strips control characters (`\x00\r\n\t`) from display names.
-- `a2t_web/templates/base.html`: minimal shell, **no nav**, no session usage.
-  `index.html` / `status.html` extend it. `status.html` uses the `human_ts`
-  filter already.
-- `a2t_web/static/app.js`: polling tolerates non-ok `/api` responses
-  (`refreshStatus` returns null, `refreshLog` returns ""). **No change needed.**
-- `a2t_web/static/style.css`: `:root` variables, `.job-meta`, `.artifacts`,
-  `.log`, `.report*` styles.
-- `tests/test_web_app.py`: `make_settings(tmp_path, **overrides)` builds
-  `WebSettings` directly (no env, no `.secrets`); `make_app` fixture →
-  `create_app(make_settings(tmp_path, **overrides))`; `client` fixture uses
-  the open-mode app. 40+ tests call `client.get/post` directly.
-- `tests/test_web_config.py`: tests `settings_from_env()` with env vars; the
-  defaults test deletes the `_ALL_ENV` vars. **Will break** unless the new
-  password-file reading is given a tmp secrets dir.
-- `tests/test_web_jobs.py`: `registry` fixture = `JobRegistry()` (no log).
-  Worker lifecycle tests drive transitions through `registry`.
-- `.gitignore`: ignores `.openrouter_key`, `/webapp-data/`, `*.docx`, etc.
-  **`.secrets/` is NOT ignored today** (untracked; would be committed by
-  mistake).
-- `.secrets/` contains only `openrouter-key` (opencode's own; NEVER read,
-  log, print, modify, or commit it).
+- **`a2t_web/config.py`**: frozen `WebSettings(data_dir, secrets_dir, user_password,
+  admin_password, secret_key, ...)`. `settings_from_env()` reads
+  `.secrets/user-password` and `.secrets/admin-password` and **fails closed** with
+  `ValueError` if either is missing, empty, or non-UTF-8. Env: `A2T_WEB_SECRETS_DIR`,
+  `A2T_WEB_SECRET_KEY`, `A2T_WEB_DATA_DIR`, etc.
+- **`a2t_web/app.py`**: `create_app(settings=None)`; `auth_enabled =
+  bool(settings.user_password or settings.admin_password)`; `before_request` guard
+  (blocked when open); `GET/POST /login` (password-only, `hmac.compare_digest`,
+  session role from which password matched); `GET /logout`; `GET /admin`
+  (`joblog.read_entries`); API routes; `main()` catches `ValueError` from
+  `settings_from_env()`. `job_log_path = data_dir / "jobs.log"` and
+  `JobRegistry(log_path=job_log_path)` are constructed unconditionally.
+- **`a2t_web/jobs.py`**: in-memory lock-guarded `RegistryJob`; `JobRegistry(log_path)`
+  with `_log_event` appending TSV records via `joblog.append_log` on create and on
+  terminal transitions. `finalize` explicitly never double-logs (early-return to
+  already-terminal jobs logs nothing).
+- **`a2t_web/joblog.py`**: TSV append-only helpers (`create_record`,
+  `terminal_record`, `format_row`, `parse_line`, `append_log`, `read_entries`).
+- **`a2t_web/worker.py`**: runs `a2t convert` as subprocess; mutates registry state;
+  `build_command` monkeypatched in tests.
+- **Templates** (`a2t_web/templates/`): `base.html` nav uses `auth_enabled` +
+  session role; `login.html` is password-only with a `next` hidden field;
+  `admin.html` renders `entries` (each has `job_id`, `pdf_name`, `status`,
+  `created_at`, `started_at`, `finished_at`, `error`).
+- **Tests**: `tests/test_web_app.py` (page flows + auth via
+  `make_app(user_password=..., admin_password=...)`), `tests/test_web_config.py`
+  (password-file handling), `tests/test_web_jobs.py` (registry + worker; joblog
+  integration via `JobRegistry(log_path=...)`), `tests/test_web_joblog.py`
+  (pure joblog tests), plus pipeline/storage/js/sanity tests unaffected here.
+- **Deployment**: `Dockerfile` CMD writes `$A2T_USER_PASSWORD` /
+  `$A2T_ADMIN_PASSWORD` into `.secrets/` files before running
+  `python -m a2t_web.app`; `.dockerignore` excludes `.secrets` and `webapp-data`;
+  README documents password files and caps at 200 admin rows.
 
 ---
 
-## 3. Proposed design
+## Proposed design
 
-### 3.1 Configuration (`a2t_web/config.py`)
+### 1. Persistence layer — new module `a2t_web/db.py` (stdlib `sqlite3`)
 
-Add three fields to the frozen `WebSettings` dataclass (defaults keep the
-existing 40+ tests and any direct `WebSettings(...)` construction working):
+**DB file**: `<data_dir>/a2t.db` (a new `db_path` field on `WebSettings`, default
+`data_dir / "a2t.db"`). Created on app startup by `Database.init()` which runs
+`CREATE TABLE IF NOT EXISTS` (idempotent) and sets pragmas `journal_mode=WAL`,
+`synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
 
-```python
-secrets_dir: Path = Path(".secrets")
-user_password: str = ""
-admin_password: str = ""
-secret_key: str | None = None          # Flask session signing; None → random per process
+**Connection strategy**: a per-instance `threading.Lock` serializes all writes;
+every function opens its **own** fresh connection (context manager), applies the
+pragmas, runs the query with `?`-parameterized SQL, commits on write, and closes.
+No connection crosses threads. This is safe under Flask's threaded dev server and
+keeps the module trivially unit-testable.
+
+**Schema**:
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user','admin')),
+    created_at REAL
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    pdf_name TEXT,
+    status TEXT,
+    error TEXT,
+    created_at REAL,
+    started_at REAL,
+    finished_at REAL
+);
 ```
 
-`_ENV_FOR` additions:
-
-| key         | env var               | type  |
-|-------------|-----------------------|-------|
-| `secrets_dir` | `A2T_WEB_SECRETS_DIR` | Path (default `.secrets`) |
-| `secret_key`  | `A2T_WEB_SECRET_KEY`  | str, optional |
-
-`settings_from_env()` flow:
-
-1. Parse env as today (add `secrets_dir` to the Path coercion branch:
-   `elif key in {"data_dir", "cache_dir", "secrets_dir"}`; `secret_key` is a
-   plain str).
-2. After coercing `values`, determine the secrets dir:
-   `secrets_dir = values.get("secrets_dir", Path(".secrets"))`.
-3. Read the two password files with a private helper:
-
-```python
-def _read_secret(secrets_dir: Path, name: str) -> str:
-    path = secrets_dir / name
-    if not path.is_file():
-        raise ValueError(
-            f"Missing password file {path}. Create {secrets_dir / 'user-password'} and "
-            f"{secrets_dir / 'admin-password'} to enable access control, then restart."
-        )
-    value = path.read_text(encoding="utf-8").strip()
-    if not value:
-        raise ValueError(f"Password file {path} is empty; set a non-empty password.")
-    return value
-```
-
-   Then `values["user_password"] = _read_secret(secrets_dir, "user-password")`
-   and `values["admin_password"] = _read_secret(secrets_dir, "admin-password")`.
-   Reading is the **only** filesystem interaction — never create/write the
-   files, never invent a password.
-4. Build `settings = WebSettings(**values)`, keep the existing `max_workers`
-   invariant check.
-
-Consequences (intended, fail-closed):
-
-- `settings_from_env()` **always** returns non-empty passwords (or raises).
-  A fresh checkout running `a2t-web` will refuse to start until the operator
-  creates both files. This is deliberate: the feature is "protect the app".
-- Open/dev mode remains reachable only when the caller constructs
-  `WebSettings` directly with empty passwords (exactly what the existing app
-  tests do).
-- Passwords never appear in exception text — only file paths.
-
-### 3.2 Durable job log — new module `a2t_web/joblog.py`
-
-A small, dependency-free module with the format + IO half. The registry (3.3)
-churns it; the admin route reads it.
-
-**File location**: `<data_dir>/jobs.log` (data dir is already runtime data;
-already gitignored via `/webapp-data/`). Parent dirs exist because
-`ensure_data_dirs` ran.
-
-**Row format** — TSV, one record per line, 9 fields, escaped safely:
-
-```
-ts  event  job_id  pdf_name  status  created_at  started_at  finished_at  error
-```
-
-- `ts`: event timestamp as `str(float(time.time()))`.
-- `event`: `"create"` | `"terminal"`.
-- `pdf_name`: the display name from `storage.safe_basename` (already
-  control-char-free, but escape anyway).
-- `status`: job status at the moment of the event (`queued` on create; the
-  terminal status on terminal).
-- `created_at` / `started_at` / `finished_at`: `str(float)` or `""` when
-  unset.
-- `error`: `job.error` or `""`.
-
-**Escaping** (handles newlines in error tails, tabs, backslashes):
-
-```python
-def _escape(s: str) -> str:
-    return (s.replace("\\", "\\\\")
-             .replace("\t", "\\t")
-             .replace("\n", "\\n")
-             .replace("\r", "\\r"))
-
-def _unescape(s: str) -> str:
-    # process left to right: \\ → \, \t → tab, \n → LF, \r → CR
-```
-
-**Public API** (all duck-typed on `Job` — `joblog.py` must NOT import
-`jobs.py`):
-
-```python
-_FIELDS = ("ts", "event", "job_id", "pdf_name", "status",
-           "created_at", "started_at", "finished_at", "error")
-
-def create_record(job) -> dict:      # event="create", status=job.status (queued)
-def terminal_record(job) -> dict:    # event="terminal", status=job.status, finished_at set
-
-def format_row(record: dict) -> str: # escape + tab-join + "\n"
-def parse_line(line: str) -> dict | None:
-    # strip trailing newline; split on "\t"; require exactly len(_FIELDS);
-    # unescape text fields; numeric fields (ts/created_at/started_at/finished_at)
-    # → float(value) if truthy else None (try/except → None on garbage).
-    # Return None for malformed lines (skip defensively).
-
-def append_log(path: Path, record: dict) -> None:
-    # path.parent.mkdir(parents=True, exist_ok=True)
-    # with path.open("a", encoding="utf-8") as f: f.write(format_row(record))
-    # OSError propagates: if we cannot persist the runtime log, fail loudly.
-
-def read_entries(path: Path, limit: int | None = None) -> list[dict]:
-    # missing file → []
-    # read all lines, parse (skip None), keep the LAST record per job_id
-    #   (later lines override earlier → a finished job shows its terminal
-    #    record; a never-finished job shows its create record),
-    # sort newest-first by ts (desc), cap at `limit`, return list of dicts
-    #   with float/None timestamps ready for the human_ts filter.
-```
-
-Why TSV+escape instead of JSON-lines: the requirement asks for "tab or CSV
-separated … escaped safely", keeps the file human-readable for an operator
-(`cat jobs.log`), and the escape pair is trivial to unit-test. Why a separate
-module: the format/IO half is reused by both `jobs.py` (write) and `app.py`
-(read), and a pure module is directly testable without a Flask app.
-
-### 3.3 Registry hooks (`a2t_web/jobs.py`)
-
-`JobRegistry.__init__` gains an **optional** `log_path`:
-
-```python
-def __init__(self, log_path: Path | None = None) -> None:
-    self._lock = threading.Lock()
-    self._jobs: dict[str, Job] = {}
-    self._log_path = log_path
-```
-
-No other call site changes: `JobRegistry()` (tests, and the default) simply
-writes nothing.
-
-Hooks (write **inside** the existing lock, after the state mutation, so the
-file ordering matches state changes; appends are single small writes):
-
-- `create`: after `self._jobs[job_id] = job`,
-  `self._log_event(job, create_record(job))`.
-- `transition`: after the existing mutation, only when
-  `status in TERMINAL_STATUSES` → `self._log_event(job, terminal_record(job))`.
-  (Non-terminal RUNNING is intentionally NOT logged — the file stays small and
-  matches the requirement "create and terminal transitions".)
-- `finalize`: after setting the terminal state (inside the lock, before
-  `return status`), `self._log_event(job, terminal_record(job))`. The
-  early-return branch for an already-terminal job logs **nothing**, so a late
-  cancel cannot double-log a finished job.
-
-```python
-def _log_event(self, job: Job, record: dict) -> None:
-    if self._log_path is not None:
-        append_log(self._log_path, record)
-```
-
-Records are captured after mutation, so they carry the authoritative status /
-`finished_at` / `error`. `sweep` does not log (the durable record stays — that
-is the point of durability).
-
-### 3.4 Auth + admin routes (`a2t_web/app.py`)
-
-New imports: `import hmac`, `from flask import ..., session, ...` (add
-`session` to the existing import list), `from a2t_web import joblog, storage`.
-
-In `create_app`:
-
-```python
-app.secret_key = settings.secret_key or secrets.token_hex(32)
-auth_enabled = bool(settings.user_password or settings.admin_password)
-job_log_path = settings.data_dir / "jobs.log"
-registry = JobRegistry(log_path=job_log_path)
-```
-
-Flask session defaults are sufficient and must not be weakened:
-`SESSION_COOKIE_HTTPONLY=True` (default), `SameSite=Lax` (Flask 2.3+ default).
-Do not set `SESSION_COOKIE_SECURE` — the app serves plain HTTP on 127.0.0.1.
-
-**Guard** (register after `api_error` is defined, so the closure exists):
-
-```python
-@app.before_request
-def _require_auth():
-    if not auth_enabled:
-        return None
-    if request.path in {"/login", "/logout"} or request.path.startswith("/static"):
-        return None
-    if session.get("authenticated"):
-        return None
-    if request.path.startswith("/api/"):
-        return api_error("Authentication required", 401)
-    return redirect(url_for("login", next=request.path))
-```
-
-Path-based exemption (not endpoint names) avoids coupling to route-function
-names. Unknown non-API paths bounce to login too — harmless.
-
-**Login** (register both GET and POST for `/login`):
-
-```python
-@app.get("/login")
-def login():
-    if not auth_enabled:
-        return redirect(url_for("index"))
-    return render_template("login.html", error=None)
-
-@app.post("/login")
-def login_post():
-    if not auth_enabled:
-        return redirect(url_for("index"))
-    password = request.form.get("password", "")
-    pw = password.encode("utf-8")
-    if hmac.compare_digest(pw, settings.user_password.encode("utf-8")):
-        role = "user"
-    elif hmac.compare_digest(pw, settings.admin_password.encode("utf-8")):
-        role = "admin"
-    else:
-        return render_template("login.html", error="Incorrect password."), 401
-    session.clear()
-    session["authenticated"] = True
-    session["role"] = role
-    next_url = request.form.get("next")
-    if next_url and next_url.startswith("/") and not next_url.startswith("//") \
-            and "\\" not in next_url:
-        return redirect(next_url)
-    return redirect(url_for("index"))
-```
-
-- `hmac.compare_digest` on UTF-8 bytes works with arbitrary (non-ASCII)
-  passwords; both comparisons run for a wrong password (the tiny
-  "matched-user vs matched-admin" timing difference is inherent to two
-  passwords and not a meaningful leak for this threat model).
-- Generic error message `"Incorrect password."` — never echo the input, never
-  log it.
-- `next` is restricted to same-origin absolute paths (rejects `//host` and
-  backslash tricks) to prevent open redirect.
-
-**Logout**:
-
-```python
-@app.get("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("index"))
-```
-
-**Admin**:
-
-```python
-@app.get("/admin")
-def admin():
-    if auth_enabled and session.get("role") != "admin":
-        abort(403)
-    entries = joblog.read_entries(job_log_path, limit=ADMIN_LOG_LIMIT)
-    return render_template("admin.html", entries=entries)
-```
-
-with module-level `ADMIN_LOG_LIMIT = 200`.
-
-- In auth mode an unauthenticated visitor never reaches the route (guard
-  redirects to login); a logged-in `user` gets 403; an `admin` renders.
-- In open mode the route renders (no role to check; the whole app is open
-  anyway, so the job log is no more sensitive than the rest).
-
-**Template state** (so `base.html` can conditionally render nav):
-
-```python
-@app.context_processor
-def _inject_auth_state():
-    return {"auth_enabled": auth_enabled}
-```
-
-`session` is already a Jinja global; the nav uses it directly.
-
-### 3.5 Templates
-
-**`a2t_web/templates/base.html`** — add a nav strip inside `<main class="container">`
-(no links shown in open mode / for plain users, so existing page-content tests
-are unaffected):
-
-```html
-{% if auth_enabled or session.get("role") == "admin" %}
-<nav class="topnav">
-  <a href="{{ url_for('index') }}">Upload</a>
-  {% if session.get("role") == "admin" %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
-  {% if session.get("authenticated") %}<a href="{{ url_for('logout') }}">Log out</a>{% endif %}
-</nav>
-{% endif %}
-```
-
-**`a2t_web/templates/login.html`** (new) — extends base; password input styled
-to match; carries the `next` hidden field from `request.args.get("next", "")`
-(rendered escaped by Jinja automatically):
-
-```html
-{% extends "base.html" %}
-{% block title %}Sign in — A2T Web{% endblock %}
-{% block content %}
-  <h1>Sign in</h1>
-  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-  <form method="post" action="{{ url_for('login') }}" class="login-form">
-    <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
-    <label for="password">Password</label>
-    <input type="password" id="password" name="password" autofocus required>
-    <button type="submit">Sign in</button>
-  </form>
-  <p class="muted">Administrators: enter the admin password to reach the admin page.</p>
-{% endblock %}
-```
-
-**`a2t_web/templates/admin.html`** (new) — server-rendered table; every field
-rendered through Jinja autoescaping (`{{ }}`), never `|safe`; reuses the
-existing `human_ts` filter (float/None timestamps come from `read_entries`):
-
-```html
-{% extends "base.html" %}
-{% block title %}Admin — job log — A2T Web{% endblock %}
-{% block content %}
-  <p><a href="{{ url_for('index') }}">&larr; Back</a></p>
-  <h1>Admin — job log</h1>
-  {% if entries %}
-  <table class="joblog">
-    <thead>
-      <tr><th>Job ID</th><th>File</th><th>Status</th><th>Created</th><th>Started</th><th>Finished</th><th>Error</th></tr>
-    </thead>
-    <tbody>
-      {% for e in entries %}
-      <tr>
-        <td><code>{{ e.job_id }}</code></td>
-        <td>{{ e.pdf_name }}</td>
-        <td class="status">{{ e.status }}</td>
-        <td>{{ e.created_at | human_ts }}</td>
-        <td>{{ e.started_at | human_ts }}</td>
-        <td>{{ e.finished_at | human_ts }}</td>
-        <td class="error">{{ e.error }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p>No jobs have been run yet.</p>
-  {% endif %}
-{% endblock %}
-```
-
-### 3.6 Styles (`a2t_web/static/style.css`)
-
-Append (using existing `:root` variables):
-
-```css
-.topnav { margin-bottom: 1rem; }
-.topnav a { margin-right: 1rem; }
-
-.login-form { max-width: 24rem; }
-.login-form input[type="password"] { width: 100%; padding: 0.4rem; margin-top: 0.25rem; }
-
-.joblog { border-collapse: collapse; width: 100%; background: #ffffff; }
-.joblog th, .joblog td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; font-size: 0.9rem; }
-.joblog th { background: rgba(0, 0, 0, 0.03); }
-.joblog td.error { color: var(--error); }
-.joblog code { font-size: 0.85em; }
-.muted { opacity: 0.7; }
-```
-
-### 3.7 `.gitignore`
-
-Add (protects both the new password files and the existing
-`.secrets/openrouter-key`):
-
-```
-# Local secrets: web-app user/admin passwords (and opencode's own key)
-.secrets/
-```
-
-### 3.8 `main()` friendly failure
-
-In `main()`, wrap `settings_from_env()` so a missing/empty password file prints
-a clear message instead of a raw traceback:
-
-```python
-def main() -> None:
-    try:
-        settings = settings_from_env()
-    except ValueError as exc:
-        print(f"a2t-web: {exc}", file=sys.stderr)
-        raise SystemExit(1) from None
-    ...
-```
-
-(Add `import sys`.) `create_app(settings)` path is unchanged; tests call
-`settings_from_env()` directly and still see the `ValueError`.
-
-### 3.9 README
-
-Update the **Web app** section:
-
-- Document that `a2t-web` now requires `.secrets/user-password` and
-  `.secrets/admin-password` next to where the app is started (create them with
-  e.g. `printf 'mypassword' > .secrets/user-password`), that both passwords are
-  required, and that startup fails fast if either file is missing/empty.
-- Document `/login`, `/logout`, and `/admin` (admin password required).
-- Document `A2T_WEB_SECRETS_DIR` (default `.secrets`) and the optional
-  `A2T_WEB_SECRET_KEY` (fixed value keeps sessions valid across restarts;
-  default is a fresh random key per process).
-- Update the "Bind to 127.0.0.1 only" bullet: with passwords configured the
-  app is no longer unauthenticated on the LAN, but localhost-only binding is
-  still recommended; keep the note that cookies are signed with a per-process
-  key by default.
+**Module API** (class `Database`; methods open their own connection):
+
+- `Database(path: Path)`
+- `init()` — create schema + pragmas; idempotent (called by `create_app`).
+- `create_user(username, password, role) -> bool` — hashes with
+  `werkzeug.security.generate_password_hash` (werkzeug ships with Flask);
+  returns `False` if username already exists (unique constraint); never stores
+  plaintext.
+- `get_user_by_username(username) -> dict | None` — row with keys `id`,
+  `username`, `password_hash`, `role`, `created_at`.
+- `verify_login(username, password) -> dict | None` — looks up by username,
+  runs `werkzeug.security.check_password_hash`, returns the user dict (minus the
+  hash) on success, `None` otherwise.
+- `list_users() -> list[dict]` — all users ordered by `id`.
+- `count_users() -> int` — decides auth-on vs open mode and whether to seed.
+- `insert_job(job) -> None` — one INSERT on job create (status usually `queued`),
+  reading fields off the `Job` dataclass (duck-typed like `joblog` was, so `db.py`
+  does not import `jobs.py`).
+- `set_job_terminal(job_id, status, error, finished_at) -> None` — one UPDATE
+  on terminal transition.
+- `list_jobs(limit: int | None = None) -> list[dict]` — `SELECT ... ORDER BY
+  created_at DESC LIMIT ?`; returns dicts with keys `job_id`, `pdf_name`,
+  `status`, `error`, `created_at`, `started_at`, `finished_at` (key `job_id`
+  matches the existing `admin.html` template so the template needs no rework).
+
+Rationale: two writes per job (INSERT on create, UPDATE on terminal) mirror today's
+two TSV records and avoid rewriting history; parameterized SQL everywhere prevents
+injection; WAL + a single-instance write lock avoids SQLite `database is locked`
+under the threaded server.
+
+### 2. Auth rework — `app.py`, `config.py`, `login.html`
+
+- `login.html` gains a username field (`name="username"`, `autofocus` moves to it);
+  password field stays. Error stays generic ("Incorrect username or password.")
+  to avoid user enumeration.
+- `POST /login` calls `db.verify_login(username, password)`. On success:
+  `session.clear()`, then `session["authenticated"]=True`,
+  `session["role"]=user["role"]`, `session["username"]=user["username"]`, redirect
+  `next` (same open-redirect guard) or `/`. On failure: `401` + generic error.
+- **Auth on/open mode**: auth is enabled whenever `db.count_users() > 0`
+  (`auth_enabled` computed after `db.init()`). An empty users table = open mode
+  (no guard, `/login` redirects to `/`), identical to today's behavior when both
+  passwords were empty. Existing non-auth app tests keep working because the
+  `make_app` fixture points at a fresh tmp data_dir with an empty DB.
+- **Bootstrap (primary)**: `create_app` calls a `seed_users(settings, db)`
+  helper that, **only when `db.count_users() == 0`**, creates users from env-derived
+  `WebSettings` seed fields:
+  - `seed_admin_username` (env `A2T_ADMIN_USERNAME`, default `"admin"`) +
+    `seed_admin_password` (env `A2T_ADMIN_PASSWORD`, required for admin seeding) →
+    role `admin`.
+  - `seed_user_username` (env `A2T_USER_USERNAME`, default `"user"`) +
+    `seed_user_password` (env `A2T_USER_PASSWORD`) → role `user`, only if set.
+  If `A2T_ADMIN_PASSWORD` is unset AND `A2T_USER_PASSWORD` is unset, nothing is
+  seeded and the app stays in open mode. Seeding is skipped entirely once any user
+  exists (safe across restarts; never duplicates).
+- **CLI (secondary)**: new minimal module `a2t_web/users.py` with
+  `create_user(db_path, username, password, role)` plus a `main()` handling
+  `create-admin`/`create-user` subcommands, exposed as a new console script
+  `a2t-web-users`. Usable anytime to add/change users (e.g. reset an admin).
+  `python -m a2t_web.app` is unchanged.
+- **`config.py`**:
+  - Remove `user_password`, `admin_password`, `secrets_dir`, and `_read_secret`.
+    The `.secrets/openrouter-key` file is read independently by `a2t.config`
+    (unchanged, unrelated to `WebSettings`), so nothing in `a2t_web.config`
+    needs a secrets dir anymore.
+  - Add `db_path: Path = Path("webapp-data") / "a2t.db"` and seed fields
+    `seed_admin_username: str = "admin"`, `seed_admin_password: str = ""`,
+    `seed_user_username: str = "user"`, `seed_user_password: str = ""`.
+  - `settings_from_env()` reads new vars `A2T_ADMIN_USERNAME`, `A2T_ADMIN_PASSWORD`,
+    `A2T_USER_USERNAME`, `A2T_USER_PASSWORD`; **no longer fails closed** on
+    password files. Keep `A2T_WEB_SECRET_KEY`, `A2T_WEB_DATA_DIR`, etc., and the
+    `max_workers` invariant. `db_path` derives from `data_dir` ("<data_dir>/a2t.db")
+    and is not env-overridable (kept simple; deployments use `A2T_WEB_DATA_DIR`).
+  - Keep `main()` unchanged (still catches `ValueError`, though now mostly for the
+    `max_workers` invariant and env parsing).
+- **Guard/before_request** stays in place: pages → `/login?next=…`; `/api/*` → 401
+  JSON; `/admin` additionally requires `session["role"] == "admin"` when auth on.
+
+Rationale: one store for users + jobs; bootstrap from env needs no interactive
+setup and matches a Docker/Render deployment; the CLI covers ops like password
+resets; deleting the plaintext files removes the fail-closed startup hazard and
+the "one password per role" limitation.
+
+### 3. Historical jobs — registry persistence hooks + `/admin`
+
+- **`JobRegistry`** keeps its in-memory dict but replaces `log_path` with `db`:
+
+  ```python
+  class JobRegistry:
+      def __init__(self, db=None): ...  # db is Optional[a2t_web.db.Database]
+  ```
+
+  - `create(...)`: after inserting into `self._jobs`, call `self._db.insert_job(job)`
+    if `db` is not None.
+  - `transition(...)`: when `status in TERMINAL_STATUSES`, call
+    `self._db.set_job_terminal(job.id, job.status, job.error, job.finished_at)`.
+    RUNNING transitions are not persisted (kept small, mirrors joblog contract).
+  - `finalize(...)`: same as today — if the job is already terminal it returns early
+    **without** a second write (no double-terminal); otherwise it sets terminal
+    state and persists via `set_job_terminal`.
+  - Persistence calls happen while holding `self._lock` (same position as today's
+    `_log_event`), so terminal rows are never interleaved.
+  - `JobRegistry()` (no `db`) still works and writes nothing — all existing
+    registry/worker/sweep tests that build `JobRegistry()` continue to pass
+    unmodified.
+- **`create_app`**: `db = db_module.Database(settings.db_path); db.init();
+  seed_users(settings, db); registry = JobRegistry(db=db)`. Store `db` on
+  `app.extensions["a2t_db"]`.
+- **`/admin`** renders from `db.list_jobs(limit=ADMIN_LOG_LIMIT)` instead of
+  `joblog.read_entries`. `ADMIN_LOG_LIMIT` (200) stays.
+- **Delete `a2t_web/joblog.py`** and **`tests/test_web_joblog.py`** (recommended for
+  cleanliness; nothing else imports `joblog` after the above). Also remove the
+  `jobs.log` path/`log_path` references everywhere (`app.py`, `jobs.py`).
+- **`admin.html`** needs no rework if `list_jobs` returns the keys the template
+  already uses (`job_id`, `pdf_name`, `status`, `created_at`, `started_at`,
+  `finished_at`, `error`); the column set already matches the desired one. Verify
+  the mapping once when wiring, adjust keys if the template accesses differ.
+
+The jobs table is durable: rows survive restarts and job-directory sweeps. The
+in-memory registry remains the only source of truth for live state (status page,
+queue position, artifact listing), with SQLite as the durable mirror.
+
+### 4. Deployment
+
+- **`Dockerfile`**: remove the `mkdir -p .secrets && printf ...` CMD prefix. New CMD:
+  `CMD ["sh", "-c", "A2T_WEB_PORT=\"${A2T_WEB_PORT:-${PORT:-5000}}\" python -m a2t_web.app"]`.
+  Container operators pass `A2T_ADMIN_PASSWORD` (required for auth),
+  `A2T_ADMIN_USERNAME` (optional, default `admin`), `A2T_USER_PASSWORD`,
+  `A2T_USER_USERNAME`, `A2T_WEB_SECRET_KEY` (recommended for stable sessions).
+- **`README.md`**: rewrite the "Access control" section — new env vars, seeding
+  on first run, the `a2t-web-users` CLI (create/reset users), DB file location
+  `<A2T_WEB_DATA_DIR>/a2t.db`, note old `.secrets/user-password` /
+  `.secrets/admin-password` are deprecated and no longer read.
+- **`.dockerignore`**: keep `.secrets` and `webapp-data` entries (DB lives in
+  webapp-data, so on Render free tier the DB is ephemeral-per-restart — document
+  this caveat in README).
 
 ---
 
-## 4. Files affected
-
-### Files to modify
-
-**`/home/alexander-wall/Dokument/a2tc-web/.gitignore`**
-- Add `.secrets/` (see 3.7). Do not remove any existing entries.
-
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/config.py`**
-- Symbols: `WebSettings`, `settings_from_env`, `_ENV_FOR`, new module-level
-  `_read_secret`.
-- Add fields `secrets_dir: Path = Path(".secrets")`, `user_password: str = ""`,
-  `admin_password: str = ""`, `secret_key: str | None = None`.
-- `_ENV_FOR` gains `"secrets_dir": "A2T_WEB_SECRETS_DIR"` and
-  `"secret_key": "A2T_WEB_SECRET_KEY"`; Path coercion set gains `secrets_dir`.
-- `settings_from_env` reads both password files after env coercion, before
-  constructing `WebSettings` (see 3.1). Update the module docstring/env
-  comment with the new env vars.
-
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/jobs.py`**
-- `JobRegistry.__init__(self, log_path: Path | None = None)`.
-- `create`: append `create_record(job)` when `log_path` set.
-- `transition`: append `terminal_record(job)` when the new status is terminal.
-- `finalize`: append `terminal_record(job)` when it actually writes a terminal
-  state (not on the early-return path).
-- New private `_log_event(self, job, record)`. Import
-  `from a2t_web.joblog import append_log, create_record, terminal_record`.
-
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/app.py`**
-- Imports: `hmac`, `sys`, `session` (add to the flask import list),
-  `from a2t_web import joblog, storage`.
-- Module constant `ADMIN_LOG_LIMIT = 200`.
-- `create_app`: `app.secret_key`, `auth_enabled`, `job_log_path`,
-  `JobRegistry(log_path=job_log_path)`; `before_request` guard; `GET/POST
-  /login`; `GET /logout`; `GET /admin`; context processor `_inject_auth_state`.
-- `main()`: friendly `ValueError` handling (3.8).
-- All existing routes unchanged.
-
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/templates/base.html`**
-- Add the conditional `<nav class="topnav">` block (3.5). Everything else
-  unchanged.
-
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/static/style.css`**
-- Append `.topnav`, `.login-form`, `.joblog`, `.muted` rules (3.6).
-
-**`/home/alexander-wall/Dokument/a2tc-web/tests/test_web_config.py`**
-- `_ALL_ENV` gains `"A2T_WEB_SECRETS_DIR"` (and `"A2T_WEB_SECRET_KEY"`).
-- Add an autouse fixture that creates a tmp secrets dir with
-  `user-password`/`admin-password` files and sets `A2T_WEB_SECRETS_DIR`, so all
-  existing `settings_from_env()` tests keep passing.
-- New tests (section 6.2).
-
-**`/home/alexander-wall/Dokument/a2tc-web/tests/test_web_app.py`**
-- Keep all existing tests (open mode). Add an auth section (section 6.1)
-  using `make_app(user_password=..., admin_password=...)` and dedicated test
-  clients. `make_settings` needs **no** change (new fields have defaults).
-
-**`/home/alexander-wall/Dokument/a2tc-web/tests/test_web_jobs.py`**
-- Add job-log integration tests (section 6.3). Existing tests unchanged
-  (`JobRegistry()` writes nothing).
-
-**`/home/alexander-wall/Dokument/a2tc-web/README.md`**
-- Document password files, `/admin`, and the new env vars (3.9).
+## Files affected
 
 ### Files to create
 
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/joblog.py`** — format/IO
-module (3.2).
+- **`a2t_web/db.py`** — module documented earlier. Functions on class `Database`:
+  `__init__`, `init`, `create_user`, `get_user_by_username`, `verify_login`,
+  `list_users`, `count_users`, `insert_job`, `set_job_terminal`, `list_jobs`,
+  plus a private `_connect()` context manager and `human_ts`-independent floats
+  (timestamps are stored as epoch `REAL`, consistent with `Job` fields).
+- **`a2t_web/users.py`** — CLI:
+  - `create_user_file(db_path, username, password, role) -> bool`
+  - `main(argv=None) -> int` handling `a2t-web-users create-admin --db PATH --username U --password P` and
+    `... create-user --db PATH --username U --password P` (+ optional `--username`
+    default not needed; require explicit username), printing a human result
+    and returning nonzero on a duplicate/unknown role/absent DB file.
+- **`tests/test_web_db.py`** — new unit tests (see Tests).
 
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/templates/login.html`** —
-login form (3.5).
+### Files to modify
 
-**`/home/alexander-wall/Dokument/a2tc-web/a2t_web/templates/admin.html`** —
-job-log table (3.5).
+- **`a2t_web/config.py`**
+  - `WebSettings`: drop `user_password`, `admin_password`, `secrets_dir`; add
+    `db_path: Path`, `seed_admin_username`, `seed_admin_password`,
+    `seed_user_username`, `seed_user_password`.
+    - Define `db_path` as a `field(default=DEFAULT_DATA_DIR / "a2t.db")` (or as a
+      `@property` after construction — simplest: make it a plain field and set it
+      from `data_dir` in `settings_from_env`; tests pass it explicitly).
+  - Remove `_read_secret`; delete env wiring for `A2T_WEB_SECRETS_DIR`; add env wiring
+    for the four seed vars; keep all other fields/mapping and the `max_workers`
+    invariant.
+- **`a2t_web/app.py`**
+  - Import `a2t_web.db` and `a2t_web.users`; drop `import joblog` and
+    `hmac` (no longer used).
+  - `create_app`: create `db`, `db.init()`, `seed_users(settings, db)`;
+    `registry = JobRegistry(db=db)`; `job_log_path` deleted;
+    `app.extensions["a2t_db"] = db`.
+  - `login()`/`login_post()`: username+password; session
+    authenticated/role/username; generic error; `auth_enabled = db.count_users() > 0` (computed after seeding; store on a local var for the request guard and context processor).
+  - `/admin`: `entries = db.list_jobs(limit=ADMIN_LOG_LIMIT)`.
+  - Guard behavior unchanged otherwise (401 for API, redirect for pages).
+- **`a2t_web/jobs.py`**
+  - `JobRegistry.__init__(self, db=None)`; drop `log_path` and the `joblog` import.
+  - Persistence hooks: `insert_job` on create; `set_job_terminal` in `transition` and
+    `finalize` terminal paths; keep the finalize early-return non-persisting.
+  - Helper method `_persist(...)` continues to be called while holding
+    the lock (same structure as today's `_log_event`).
+- **`a2t_web/templates/login.html`** — add `<label for="username">Username</label>`
+  + `<input type="text" id="username" name="username" autofocus required>` before
+  the password field; keep the hidden `next` input; generic error copy "Incorrect
+  username or password."; keep `.muted` hint updated to say you sign in with your
+  username.
+- **`a2t_web/templates/admin.html`** — unchanged unless `list_jobs` key names
+  differ; verify the template still renders from `entries` dicts with the
+  documented keys.
+- **`Dockerfile`** — remove the `.secrets` writing step in CMD (see Deployment).
+- **`README.md`** — access-control + deployment docs (see Deployment).
+- **`pyproject.toml`** — add console script `a2t-web-users = "a2t_web.users:main"`.
+- **`tests/test_web_app.py`** — rework auth tests (see Tests).
+- **`tests/test_web_config.py`** — rewrite around the new fields (see Tests).
+- **`tests/test_web_jobs.py`** — replace the joblog-integration tests with
+  db-persistence registry tests; the rest stays (see Tests).
 
-**`/home/alexander-wall/Dokument/a2tc-web/tests/test_web_joblog.py`** — pure
-unit tests for `joblog` (section 6.4).
+### Files to delete
 
-### Explicitly NOT changed
+- `a2t_web/joblog.py`
+- `tests/test_web_joblog.py`
 
-- `a2t_web/static/app.js` (polling already tolerates 401s), `worker.py`,
-  `storage.py`, `status.html`, `index.html`, `opencode.json`, `prompts/*.md`,
-  `.secrets/openrouter-key` (never read/print/modify), stale `build/lib/…`
-  copies.
+### Unchanged (intentionally)
 
----
-
-## 5. Implementation sequence
-
-1. **`.gitignore`**: add `.secrets/`.
-2. **`a2t_web/joblog.py`** (new): `_escape`, `_unescape`, `_FIELDS`,
-   `create_record`, `terminal_record`, `format_row`, `parse_line`,
-   `append_log`, `read_entries`. Unit-test round-trips before wiring anything.
-3. **`a2t_web/config.py`**: new `WebSettings` fields + `_ENV_FOR` + `_read_secret`
-   + `settings_from_env` password-file reading. Update `tests/test_web_config.py`
-   (autouse tmp-secrets fixture + new tests); run `pytest tests/test_web_config.py`.
-4. **`a2t_web/jobs.py`**: `log_path` param + hooks in `create`/`transition`/
-   `finalize`. Add job-log tests to `tests/test_web_jobs.py`; run
-   `pytest tests/test_web_jobs.py`.
-5. **`a2t_web/app.py`**: secret key, `auth_enabled`, `JobRegistry(log_path=…)`,
-   guard, `/login`, `/logout`, `/admin`, context processor, `main()` friendly
-   error. 
-6. **Templates + styles**: `base.html` nav, `login.html`, `admin.html`,
-   `style.css` additions.
-7. **Auth tests**: add the auth section to `tests/test_web_app.py`; run
-   `pytest tests/test_web_app.py`.
-8. **`tests/test_web_joblog.py`** (new): pure `joblog` unit tests; run it.
-9. **README.md** web-app section updates.
-10. **Full suite**: `pip install -e ".[dev,web]" && pytest` — everything must
-    pass. Manual smoke (optional, not automated): with
-    `.secrets/user-password` + `.secrets/admin-password` created, start
-    `a2t-web`, confirm `/` redirects to `/login`, wrong password shows
-    "Incorrect password.", user login reaches `/`, admin login reaches
-    `/admin`, a plain user gets 403 on `/admin`, `/logout` returns to `/login`
-    on next navigation, `/api/jobs/…` without a session returns 401 JSON, and
-    `jobs.log` appears in the data dir.
-
----
-
-## 6. Tests
-
-### 6.1 New auth tests — `tests/test_web_app.py`
-
-Reuse `make_app` (it already forwards overrides into `make_settings`). For each
-auth test build a dedicated client: `app_ = make_app(user_password="user-pw",
-admin_password="admin-pw")` then `c = app_.test_client()`.
-
-- `test_login_page_served_when_auth_enabled` — GET `/login` → 200; contains
-  `name="password"`.
-- `test_open_mode_has_no_login_requirement` — default `client` GET `/` → 200
-  (already covered by existing tests; keep as an explicit guard).
-- `test_unauthenticated_page_redirects_to_login` — auth app, GET `/` → 302,
-  `Location` starts with `/login` and contains `next=/`.
-- `test_unauthenticated_api_returns_401_json` — auth app, GET `/api/jobs/nope`
-  → 401; `rv.get_json()["error"]` non-empty.
-- `test_login_wrong_password_rejected` — POST `/login` `{"password":"nope"}` →
-  401; body contains "Incorrect password."; then GET `/` still 302s to login.
-- `test_login_user_password_grants_access` — POST `/login`
-  `{"password":"user-pw"}` → 302; follow to `/` → 200 with upload form.
-- `test_login_admin_password_grants_admin` — POST `/login`
-  `{"password":"admin-pw"}` → 302; GET `/admin` → 200, contains "job log".
-- `test_login_redirects_to_next` — GET `/jobs/xyz` unauthenticated → 302
-  `Location` contains `next=/jobs/xyz`; then POST `/login` with
-  `{"password":"user-pw","next":"/jobs/xyz"}` → 302 to `/jobs/xyz`.
-- `test_login_next_blocks_open_redirect` — POST `/login` with
-  `next="//evil.example"` → 302 to `/` (not the external host).
-- `test_user_cannot_access_admin` — login as user; GET `/admin` → 403.
-- `test_admin_page_shows_job_entries` — login as admin; upload a job
-  (`c.post("/jobs", ...)`), `complete_job(c, job_id)`, GET `/admin` → 200 and
-  contains the job id, `com.pdf`, and `done`.
-- `test_admin_page_empty_state` — auth app, login as admin, GET `/admin` → 200
-  and contains "No jobs".
-- `test_logout_clears_session` — login as user; GET `/logout` → 302; GET `/`
-  → 302 back to `/login`.
-- `test_admin_nav_link_only_for_admin` — login as admin, GET `/` contains
-  `href="/admin"`; login as user, GET `/` does not contain `href="/admin"`.
-
-### 6.2 Updated/new config tests — `tests/test_web_config.py`
-
-Autouse fixture: write `user-password` and `admin-password` into a tmp dir,
-`monkeypatch.setenv("A2T_WEB_SECRETS_DIR", str(tmp))`, and clean all other
-`_ALL_ENV` vars as the existing defaults test does. Existing tests then pass
-unchanged in behavior (they only assert non-password fields). Add:
-
-- `test_settings_reads_passwords_from_secrets_dir` — after fixture,
-  `settings_from_env().user_password == "user"` and
-  `.admin_password == "admin"` (fixture writes those values).
-- `test_settings_missing_password_file_raises` — fresh tmp dir (no files),
-  set `A2T_WEB_SECRETS_DIR`; `pytest.raises(ValueError, match="user-password")`.
-- `test_settings_empty_password_file_raises` — file containing only
-  `"\n"`; `pytest.raises(ValueError, match="empty")`.
-- `test_settings_strips_password_whitespace` — files containing
-  `"  pw  \n"` / `" admin-pw \n"` → stripped values.
-- `test_settings_secrets_dir_env_override` — covered by the fixture, but add an
-  explicit test that a second tmp dir with different values is honored.
-- `test_settings_accepts_fixed_secret_key` — `A2T_WEB_SECRET_KEY=abc` →
-  `settings.secret_key == "abc"`.
-
-### 6.3 Job-log integration tests — `tests/test_web_jobs.py`
-
-Use `JobRegistry(log_path=tmp_path / "jobs.log")`:
-
-- `test_registry_create_appends_log` — create → file exists with 1 line;
-  `parse_line` returns `event == "create"`, `job_id`, `pdf_name`, `status ==
-  QUEUED`.
-- `test_registry_terminal_transition_appends_log` — create, then
-  `transition(DONE)` → 2 lines; last line `event == "terminal"`,
-  `status == DONE`, `finished_at` is a float.
-- `test_registry_finalize_appends_error_log` — create, `finalize(FAILED,
-  error="boom")` → last line error `"boom"`.
-- `test_registry_finalize_does_not_double_log_terminal` — create, `finalize(DONE)`,
-  `finalize(CANCELLED)` → still 2 lines (early return logs nothing).
-- `test_registry_no_log_path_writes_nothing` — `JobRegistry()` + create →
-  no `jobs.log` file created.
-- `test_registry_log_escapes_error_with_newlines` — `finalize(FAILED,
-  error="line1\nline2\tboom")` → parsing the line round-trips the exact error.
-- `test_registry_running_transition_not_logged` — create, `transition(RUNNING)`
-  → still 1 line (only create).
-
-### 6.4 Pure `joblog` unit tests — `tests/test_web_joblog.py` (new)
-
-- escape/unescape round-trip: `\`, tab, LF, CR, mixed.
-- `format_row`/`parse_line` round-trip a create and a terminal record.
-- `parse_line` on malformed lines (wrong field count, junk) → None; empty
-  string → None.
-- `append_log` appends; parent dir is created when missing.
-- `read_entries` on a missing file → [].
-- `read_entries` newest-first ordering and `limit` cap.
-- `read_entries` keeps the last record per job_id (create + terminal → one
-  dict with the terminal status).
-
-### Regression
-
-- All existing `tests/test_web_app.py`, `tests/test_web_config.py`,
-  `tests/test_web_jobs.py`, `tests/test_web_storage.py`, `tests/test_web_js.py`
-  tests pass unchanged (open mode / no log_path defaults).
-- Run: `pytest tests/test_web_config.py tests/test_web_app.py
-  tests/test_web_jobs.py tests/test_web_joblog.py`, then full `pytest`.
+- `a2t_web/worker.py` (or only still uses `registry`; no change), `wsgi.py`,
+  `a2t_web/storage.py`, `a2t_web/sanity.py`, `a2t_web/pipeline.py`, all templates
+  other than `login.html`, the remaining `tests/test_web_*.py` files.
 
 ---
 
-## 7. Risks and constraints
+## Implementation sequence
 
-- **XSS (admin page)**: job ids, PDF filenames, statuses, and **errors** are
-  operator/data-derived text rendered in `admin.html`. Rely on Jinja
-  autoescaping (default on) — never use `|safe`; the only safe construction is
-  `{{ ... }}`. `read_entries` already caps rows, but the file itself is
-  operator-writable on disk anyway (same trust boundary as the data dir).
-- **Password leakage**: passwords exist only in `.secrets/*` and in memory.
-  They must never appear in: HTML, `jobs.log`, exception text, test output,
-  or README examples with real values. The login error is the generic
-  `"Incorrect password."`; config errors name file paths only; `main()`
-  prints the `ValueError` message (paths, not contents).
-- **Fail closed**: `settings_from_env` raises on missing/empty password files.
-  A fresh checkout will not start `a2t-web` until the operator creates
-  `.secrets/user-password` and `.secrets/admin-password`. This is the
-  intended behavior per the feature request; README must call it out. Open
-  mode is only reachable by constructing `WebSettings` directly (tests).
-- **Session/cookie security**: `secret_key` is random per process by default
-  → sessions are invalidated on restart (users re-login; acceptable). Set
-  `A2T_WEB_SECRET_KEY` to a fixed value to persist sessions. Flask defaults:
-  HttpOnly + SameSite=Lax cookies. `SESSION_COOKIE_SECURE` stays off because
-  the app serves plain HTTP on 127.0.0.1; keep localhost binding recommended.
-  Signed cookies are tamper-proof; nothing sensitive is stored in the cookie
-  besides a role string.
-- **Timing**: `hmac.compare_digest` prevents password-timing attacks. The
-  negligible "user vs admin match" timing difference is accepted (two
-  passwords are a deliberate feature).
-- **Job-log durability**: appends use `open(path, "a")` (O_APPEND) under the
-  registry lock; no fsync per write. Worst case on a hard crash is the loss of
-  the very last line — acceptable for a job history log. `OSError` from
-  `append_log` propagates (fail loud; a read-only data dir means the app is
-  broken anyway).
-- **Concurrency**: all log writes happen inside the existing registry lock;
-  the worker, cancel route, and upload route all mutate through the registry,
-  so lines cannot interleave. `read_entries` reads the whole file without a
-  lock — a concurrent append mid-read can only truncate the final partial
-  line, which `parse_line` skips.
-- **Backwards compatibility**: open mode preserves all existing tests and
-  behavior. `JobRegistry()` without `log_path` writes nothing. Existing
-  endpoints and API shapes unchanged. No new dependencies. `WebSettings` gains
-  only optional fields with defaults.
-- **Behavior change for operators**: `a2t-web` now requires the two password
-  files; `/api/*` returns 401 without a session when auth is enabled; the
-  JSON API and artifact downloads are gated too (that is the point — the API
-  and artifacts would otherwise leak report.md and docx content).
-- **Unresolved assumptions / open questions**:
-  1. Startup fails when the seed files are absent — confirmed as the intended
-     design; the consequence (can't run `a2t-web` on a fresh checkout without
-     creating the files) is flagged for product sign-off.
-  2. `/admin` renders only the durable file. A job that is still running (or
-     crashed mid-flight) shows its `create` record with status `queued` until
-     a terminal record lands. Overlaying live registry snapshots is a possible
-     follow-up; deliberately out of scope to keep the page simple.
-  3. `/admin` is reachable in open mode (no auth configured) as a dev
-     convenience; if product prefers a hard 403 there even in open mode, that
-     is a one-line change in the route.
-  4. `A2T_WEB_SECRET_KEY` documentation (3.9) is included because session
-     persistence across restarts is otherwise surprising; whether to advertise
-     it more prominently is a docs choice.
+1. **`a2t_web/db.py`** (new) — schema, pragmas, lock, `_connect`, user functions,
+   job functions, `list_jobs`. Unit-test `tests/test_web_db.py` and iterate until
+   green before wiring anything else.
+2. **`a2t_web/config.py`** — remove password fields; add `db_path` + seed fields;
+   rewrite `settings_from_env` env mapping (env seed vars; no fail-closed password
+   reads; keep `max_workers` invariant). Update `tests/test_web_config.py`.
+3. **`a2t_web/jobs.py`** — swap `log_path`/joblog for optional `db`; wire
+   `create`/`transition`/`finalize`. Keep `Registry()` (no db) behavior identical.
+4. **`a2t_web/app.py`** — wire `db.init()`, seeding, `JobRegistry(db=db)`, the
+   username/password `login_post`, session additions, `/admin` from DB, remove
+   `job_log_path` usage. Update `tests/test_web_app.py` auth block.
+5. **`templates/login.html`** — username field + error text.
+6. **`a2t_web/users.py`** + **`pyproject.toml`** script; add `test_web_users.py`
+   tests (or fold into `test_web_db.py`).
+7. **Delete** `a2t_web/joblog.py` and `tests/test_web_joblog.py`; remove leftover
+   references (grep `joblog`, `log_path`, `jobs.log`).
+8. **`tests/test_web_jobs.py`** — swap the joblog-integration block for DB-backed
+   registry tests.
+9. **`Dockerfile`**, **`README.md`**, **`.dockerignore`** (verify).
+10. **Full test run**: `python -m pytest tests/` (project has no test runner other
+    than pytest; command used elsewhere in repo docs: `pytest`).
+
+---
+
+## Tests
+
+### New: `tests/test_web_db.py`
+
+- `init` is idempotent — calling twice creates no error, tables exist.
+- Database file is created at the given path (parent dirs created).
+- `create_user` then `verify_login` succeeds for a `user` and an `admin`.
+- `verify_login` returns `None` for wrong password and for unknown username
+  (both cases identical — no user enumeration via return shape).
+- `create_user` with a duplicate username returns `False` and does not overwrite.
+- Password stored is not the plaintext; it is a valid werkzeug hash
+  (`check_password_hash` of stored hash == True).
+- `list_users` returns created users ordered by id.
+- `insert_job` + `set_job_terminal` (DONE/FAILED/CANCELLED) → `list_jobs` returns
+  one terminal row with correct fields; ordering is `created_at` DESC; `limit`
+  respected; unknown `set_job_terminal` on a missing id is a no-op (UPDATE affects
+  0 rows — make it not raise).
+- `error` survives round-trip, including newlines/tabs.
+- Basic thread-safety: a few threads call `insert_job`/`set_job_terminal`
+  concurrently into one `Database`, no `OperationalError` raised, all rows present.
+
+### Rework: `tests/test_web_app.py` (auth section only, lines ~552+)
+
+- Replace `make_auth_client(make_app, user_pw, admin_pw)` with a version that
+  passes seed settings:
+
+  ```python
+  def make_auth_client(make_app, admin_user="admin", admin_pw="admin-pw",
+                       user="user", user_pw="user-pw"):
+      return make_app(
+          seed_admin_username=admin_user, seed_admin_password=admin_pw,
+          seed_user_username=user, seed_user_password=user_pw,
+      ).test_client()
+  ```
+
+- Rewrite `login(client, password)` → `login(client, username, password,
+  next_url=None)` posting `{"username": ..., "password": ...}`.
+- Cases:
+  - `test_login_page_served_when_auth_enabled` → 200, `name="username"` present.
+  - `test_open_mode_has_no_login_requirement(client)` stays (empty DB): no seed
+    vars → `/` 200.
+  - `test_unauthenticated_page_redirects_to_login` — unchanged semantics.
+  - `test_unauthenticated_api_returns_401_json` — unchanged.
+  - `test_login_wrong_password_rejected` / new `test_login_wrong_username_rejected`
+    → 401, body "Incorrect username or password.", `/` still redirects.
+  - `test_login_user_grants_access` — `login(user, user_pw)` → `/` 200.
+  - `test_login_admin_grants_admin` — `login(admin, admin_pw)` → `/admin` 200 with
+    "job log".
+  - `test_login_redirects_to_next`, `test_login_next_blocks_open_redirect` —
+    updated to include username.
+  - `test_user_cannot_access_admin` — user login → 403.
+  - `test_admin_page_shows_job_entries` — after upload+complete, `/admin` shows the
+    job id + pdf_name (reads from SQLite now).
+  - `test_admin_page_empty_state` — no rows → "No jobs".
+  - `test_logout_clears_session`, `test_admin_nav_link_only_for_admin` —
+    updated to use seeded clients.
+  - Delete tests tied to empty/identical passwords
+    (`test_empty_configured_user_password_never_authenticates`,
+    `test_empty_admin_password_falls_back_to_user`,
+    `test_identical_user_and_admin_passwords_grant_admin`) — obsolete (role comes
+    from the users table, not which password matched).
+  - `test_session_cookie_samesite_is_lax`, `test_unauthenticated_api_endpoints_denied`,
+    `test_unauthenticated_upload_redirects_and_creates_no_job`,
+    `test_admin_page_escapes_job_error_and_pdf_name` — keep, seeded-client version.
+- Non-auth page/API tests keep working: `client` fixture opens a fresh tmp
+  data_dir => empty DB => open mode; `registry.transition` calls write through to
+  db but harmlessly.
+
+### Rework: `tests/test_web_config.py`
+
+- Drop the `secrets_env` fixture and all `user_password`/`admin_password`/file tests.
+- New env mapping tests: defaults for seed vars; `A2T_ADMIN_PASSWORD`/`A2T_USER_PASSWORD`
+  parsed; `A2T_ADMIN_USERNAME`/`A2T_USER_USERNAME` parsed; still parses integer
+  options and the `A2T_WEB_MAX_WORKERS` invariant; `db_path` default is
+  `<A2T_WEB_DATA_DIR>/a2t.db` and honors `A2T_WEB_DATA_DIR`; `secret_key` env still
+  set.
+
+### Rework: `tests/test_web_jobs.py`
+
+- Delete the import of `a2t_web.joblog`; the registry fixture `Registry()` (no db)
+  stays for worker/registry tests.
+- Replace the "job-log integration" block (lines ~201-271) with DB-backed
+  equivalents using a `tmp_path` `Database` and `Registry(db=db)`:
+  - create persists one row (status `queued`),
+  - terminal transition persists `set_job_terminal`,
+  - `finalize` persists and the early-return does not double-write,
+  - running transition not persisted,
+  - error with newlines round-trips.
+- Other tests (queue position, sweep, worker lifecycle, tail) unchanged.
+
+### Tests to delete
+
+- `tests/test_web_joblog.py` (whole file).
+
+### Optional new: `tests/test_web_users.py`
+
+- CLI `create-user`/`create-admin` create users in a tmp DB; duplicate returns
+  nonzero + message; missing/empty DB prints a clear error.
+
+---
+
+## Risks and constraints
+
+- **Backwards compatibility**: breaking change — the `.secrets/user-password` /
+  `.secrets/admin-password` files stop being read. Existing deployments must set
+  the new seed env vars (or use the CLI) once. On first run with no seed vars the
+  app starts **open** (no auth) — same as today's empty-password open mode.
+  Data layout under `data_dir` (uploads, jobs) is unchanged; only the credential
+  mechanism differs.
+- **Security**:
+  - Passwords hashed with `werkzeug.security.generate_password_hash`
+    (scrypt/pbkdf2) — never plaintext; DB file should be protected by host file
+    permissions.
+  - Generic login error prevents username enumeration; `verify_login` returns the
+    same `None` shape for unknown user and wrong password.
+  - All SQL parameterized `?` placeholders — no string interpolation.
+  - Session cookie unchanged: signed by `A2T_WEB_SECRET_KEY`.
+  - Seeding seeds users only when the users table is empty; env-seed passwords must
+    not be echoed in logs.
+- **Concurrency**: SQLite single-writer lock serialized by `threading.Lock` inside
+  `Database`; WAL + `busy_timeout` reduce contention. All connections are per-op,
+  no cross-thread connection reuse. `max_workers` remains 1.
+- **Performance**: WAL writes on job create/terminal are sub-ms; `/admin` query is
+  indexed. `jobs` table may grow unbounded over time — acceptable for the single
+  operator; future work could add a `ORDER BY created_at` index and pruning.
+- **Ephemeral disk on Render free tier**: DB lives under `webapp-data` which is
+  excluded from the image (`.dockerignore`) and is ephemeral on Render free tier —
+  history will not survive a render re-deploy. Document; note that providing a
+  persistent volume path via `A2T_WEB_DATA_DIR` makes history durable.
+- **Unresolved assumptions**:
+  - Username uniqueness is enforced after trim/lowercase? The plan stores username
+    exactly as provided (case-sensitive UNIQUE). Optionally normalize with
+    `.strip()` on create and on login to avoid accidental duplicates — implementer
+    should call `.strip()` on usernames in `create_user`/`verify_login`/login form.
+  - First-run seeding decides "admin" as the default username; admins can add more
+    via CLI thereafter.
+  - No migration is provided for legacy `jobs.log` — old history is not imported
+    into the DB (out of scope).
+  - `admin.html` is kept as-is except if keys differ; verify during step 4.

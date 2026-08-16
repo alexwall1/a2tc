@@ -14,7 +14,7 @@ import pytest
 
 import a2t_web.worker as worker_module
 from a2t_web.config import WebSettings
-from a2t_web.joblog import parse_line
+from a2t_web.db import Database
 from a2t_web.jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING, Job, JobRegistry
 from a2t_web.pipeline import tail
 
@@ -197,78 +197,103 @@ def test_registry_job_dir(registry, tmp_path):
     assert registry.job_dir(job.id) == tmp_path / "jobs" / job.id
 
 
-# ------------------------------------------------------------ job-log integration
+# ------------------------------------------------------------ db persistence
 
 
-def read_log_lines(path: Path):
-    return [parse_line(line) for line in path.read_text().splitlines()]
+def make_db_registry(tmp_path: Path, name: str = "a2t.db"):
+    db = Database(tmp_path / name)
+    db.init()
+    return JobRegistry(db=db), db
 
 
-def test_registry_create_appends_log(tmp_path):
-    registry = JobRegistry(log_path=tmp_path / "jobs.log")
+def test_registry_create_persists_row(tmp_path):
+    registry, db = make_db_registry(tmp_path)
     make_job(registry, tmp_path, job_id="abc", pdf_name="COM.pdf")
-    lines = read_log_lines(tmp_path / "jobs.log")
-    assert len(lines) == 1
-    assert lines[0]["event"] == "create"
-    assert lines[0]["job_id"] == "abc"
-    assert lines[0]["pdf_name"] == "COM.pdf"
-    assert lines[0]["status"] == QUEUED
-    assert lines[0]["finished_at"] is None
+    rows = db.list_jobs()
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == "abc"
+    assert rows[0]["pdf_name"] == "COM.pdf"
+    assert rows[0]["status"] == QUEUED
+    assert rows[0]["finished_at"] is None
 
 
-def test_registry_terminal_transition_appends_log(tmp_path):
-    registry = JobRegistry(log_path=tmp_path / "jobs.log")
-    job = make_job(registry, tmp_path, job_id="abc")
-    registry.transition(job.id, status=DONE)
-    lines = read_log_lines(tmp_path / "jobs.log")
-    assert len(lines) == 2
-    last = lines[-1]
-    assert last["event"] == "terminal"
-    assert last["status"] == DONE
-    assert last["finished_at"] is not None
-
-
-def test_registry_finalize_appends_error_log(tmp_path):
-    registry = JobRegistry(log_path=tmp_path / "jobs.log")
-    job = make_job(registry, tmp_path, job_id="abc")
-    registry.finalize(job.id, status=FAILED, error="boom")
-    lines = read_log_lines(tmp_path / "jobs.log")
-    assert len(lines) == 2
-    assert lines[-1]["event"] == "terminal"
-    assert lines[-1]["status"] == FAILED
-    assert lines[-1]["error"] == "boom"
-
-
-def test_registry_finalize_does_not_double_log_terminal(tmp_path):
-    registry = JobRegistry(log_path=tmp_path / "jobs.log")
-    job = make_job(registry, tmp_path, job_id="abc")
-    registry.finalize(job.id, status=DONE)
-    registry.finalize(job.id, status=CANCELLED)
-    lines = read_log_lines(tmp_path / "jobs.log")
-    assert len(lines) == 2
-
-
-def test_registry_no_log_path_writes_nothing(registry, tmp_path):
-    make_job(registry, tmp_path)
-    assert not (tmp_path / "jobs.log").exists()
-
-
-def test_registry_log_escapes_error_with_newlines(tmp_path):
-    registry = JobRegistry(log_path=tmp_path / "jobs.log")
-    job = make_job(registry, tmp_path, job_id="abc")
-    registry.finalize(job.id, status=FAILED, error="line1\nline2\tboom")
-    lines = read_log_lines(tmp_path / "jobs.log")
-    assert len(lines) == 2
-    assert lines[-1]["error"] == "line1\nline2\tboom"
-
-
-def test_registry_running_transition_not_logged(tmp_path):
-    registry = JobRegistry(log_path=tmp_path / "jobs.log")
+def test_registry_terminal_transition_persists(tmp_path):
+    registry, db = make_db_registry(tmp_path)
     job = make_job(registry, tmp_path, job_id="abc")
     registry.transition(job.id, status=RUNNING)
-    lines = read_log_lines(tmp_path / "jobs.log")
-    assert len(lines) == 1
-    assert lines[0]["event"] == "create"
+    registry.transition(job.id, status=DONE)
+    # RUNNING transitions are not persisted, but a terminal transition must
+    # carry the job's started_at into the durable row so /admin can show it
+    assert job.started_at is not None
+    assert job.finished_at is not None
+    rows = db.list_jobs()
+    assert len(rows) == 1
+    assert rows[0]["status"] == DONE
+    assert rows[0]["started_at"] == job.started_at
+    assert rows[0]["finished_at"] == job.finished_at
+
+
+def test_registry_finalize_persists_error(tmp_path):
+    registry, db = make_db_registry(tmp_path)
+    job = make_job(registry, tmp_path, job_id="abc")
+    registry.finalize(job.id, status=FAILED, error="boom")
+    rows = db.list_jobs()
+    assert len(rows) == 1
+    assert rows[0]["status"] == FAILED
+    assert rows[0]["error"] == "boom"
+
+
+def test_registry_cancel_queued_job_persists_null_started_at(tmp_path):
+    registry, db = make_db_registry(tmp_path)
+    job = make_job(registry, tmp_path, job_id="abc")
+    registry.finalize(job.id, status=CANCELLED)  # cancelled while still queued
+    rows = db.list_jobs()
+    assert len(rows) == 1
+    assert rows[0]["status"] == CANCELLED
+    assert rows[0]["started_at"] is None
+    assert rows[0]["finished_at"] is not None
+
+
+def test_registry_finalize_early_return_does_not_overwrite_done(tmp_path):
+    registry, db = make_db_registry(tmp_path)
+    job = make_job(registry, tmp_path, job_id="abc")
+    registry.finalize(job.id, status=DONE)
+    registry.finalize(job.id, status=CANCELLED)  # early return: no second write
+    rows = db.list_jobs()
+    assert len(rows) == 1
+    assert rows[0]["status"] == DONE
+    assert rows[0]["error"] is None
+
+
+def test_registry_no_db_writes_nothing(registry, tmp_path):
+    make_job(registry, tmp_path)
+    assert not (tmp_path / "a2t.db").exists()
+    assert db_registry_files(tmp_path) == []
+
+
+def db_registry_files(tmp_path: Path) -> list[Path]:
+    return sorted(
+        p for p in tmp_path.iterdir() if p.name.startswith("a2t.db")
+    )
+
+
+def test_registry_db_error_with_newlines_roundtrips(tmp_path):
+    registry, db = make_db_registry(tmp_path)
+    job = make_job(registry, tmp_path, job_id="abc")
+    registry.finalize(job.id, status=FAILED, error="line1\nline2\tboom")
+    rows = db.list_jobs()
+    assert rows[0]["error"] == "line1\nline2\tboom"
+
+
+def test_registry_running_transition_not_persisted(tmp_path):
+    registry, db = make_db_registry(tmp_path)
+    job = make_job(registry, tmp_path, job_id="abc")
+    registry.transition(job.id, status=RUNNING)
+    rows = db.list_jobs()
+    assert len(rows) == 1
+    # only the create row exists; the row's status never flipped from queued
+    assert rows[0]["status"] == QUEUED
+    assert rows[0]["started_at"] is None
 
 
 # ---------------------------------------------------------------- worker: happy

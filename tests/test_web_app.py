@@ -15,6 +15,7 @@ pytest.importorskip("flask")
 import a2t_web.app as app_module
 from a2t_web.app import create_app, human_ts
 from a2t_web.config import WebSettings
+from a2t_web.db import Database
 from a2t_web.jobs import CANCELLED, DONE, FAILED, QUEUED, RUNNING
 from a2t_web.sanity import SanityError
 
@@ -46,6 +47,7 @@ def make_settings(tmp_path: Path, **overrides) -> WebSettings:
         "job_timeout": 3600,
         "job_ttl_hours": 24,
         "poll_seconds": 2,
+        "db_path": tmp_path / "a2t.db",
     }
     values.update(overrides)
     return WebSettings(**values)
@@ -552,13 +554,17 @@ def registry_for(client):
 # ---------------------------------------------------------------------- auth
 
 
-def make_auth_client(make_app, user_pw: str = "user-pw", admin_pw: str = "admin-pw"):
-    app_ = make_app(user_password=user_pw, admin_password=admin_pw)
+def make_auth_client(make_app, admin_user="admin", admin_pw="admin-pw",
+                     user="user", user_pw="user-pw"):
+    app_ = make_app(
+        seed_admin_username=admin_user, seed_admin_password=admin_pw,
+        seed_user_username=user, seed_user_password=user_pw,
+    )
     return app_.test_client()
 
 
-def login(client, password: str, next_url: str | None = None) -> None:
-    data = {"password": password}
+def login(client, username: str, password: str, next_url: str | None = None):
+    data = {"username": username, "password": password}
     if next_url is not None:
         data["next"] = next_url
     rv = client.post("/login", data=data)
@@ -570,6 +576,7 @@ def test_login_page_served_when_auth_enabled(make_app):
     c = make_auth_client(make_app)
     rv = c.get("/login")
     assert rv.status_code == 200
+    assert b'name="username"' in rv.data
     assert b'name="password"' in rv.data
 
 
@@ -594,23 +601,31 @@ def test_unauthenticated_api_returns_401_json(make_app):
 
 def test_login_wrong_password_rejected(make_app):
     c = make_auth_client(make_app)
-    rv = c.post("/login", data={"password": "nope"})
+    rv = c.post("/login", data={"username": "user", "password": "nope"})
     assert rv.status_code == 401
-    assert b"Incorrect password." in rv.data
+    assert b"Incorrect username or password." in rv.data
     assert c.get("/").status_code == 302
 
 
-def test_login_user_password_grants_access(make_app):
+def test_login_wrong_username_rejected(make_app):
     c = make_auth_client(make_app)
-    login(c, "user-pw")
+    rv = c.post("/login", data={"username": "unknown", "password": "user-pw"})
+    assert rv.status_code == 401
+    assert b"Incorrect username or password." in rv.data
+    assert c.get("/").status_code == 302
+
+
+def test_login_user_grants_access(make_app):
+    c = make_auth_client(make_app)
+    login(c, "user", "user-pw")
     rv = c.get("/")
     assert rv.status_code == 200
     assert b'name="pdf"' in rv.data
 
 
-def test_login_admin_password_grants_admin(make_app):
+def test_login_admin_grants_admin(make_app):
     c = make_auth_client(make_app)
-    login(c, "admin-pw")
+    login(c, "admin", "admin-pw")
     rv = c.get("/admin")
     assert rv.status_code == 200
     assert b"job log" in rv.data
@@ -621,13 +636,16 @@ def test_login_redirects_to_next(make_app):
     rv = c.get("/jobs/xyz")
     assert rv.status_code == 302
     assert "next=/jobs/xyz" in rv.headers["Location"]
-    rv = login(c, "user-pw", next_url="/jobs/xyz")
+    rv = login(c, "user", "user-pw", next_url="/jobs/xyz")
     assert rv.headers["Location"] == "/jobs/xyz"
 
 
 def test_login_next_blocks_open_redirect(make_app):
     c = make_auth_client(make_app)
-    rv = c.post("/login", data={"password": "user-pw", "next": "//evil.example"})
+    rv = c.post(
+        "/login",
+        data={"username": "user", "password": "user-pw", "next": "//evil.example"},
+    )
     assert rv.status_code == 302
     assert rv.headers["Location"] != "//evil.example"
     assert rv.headers["Location"].startswith("/")
@@ -635,13 +653,13 @@ def test_login_next_blocks_open_redirect(make_app):
 
 def test_user_cannot_access_admin(make_app):
     c = make_auth_client(make_app)
-    login(c, "user-pw")
+    login(c, "user", "user-pw")
     assert c.get("/admin").status_code == 403
 
 
 def test_admin_page_shows_job_entries(make_app):
     c = make_auth_client(make_app)
-    login(c, "admin-pw")
+    login(c, "admin", "admin-pw")
     job_id = upload(c)
     complete_job(c, job_id)
     rv = c.get("/admin")
@@ -653,7 +671,7 @@ def test_admin_page_shows_job_entries(make_app):
 
 def test_admin_page_empty_state(make_app):
     c = make_auth_client(make_app)
-    login(c, "admin-pw")
+    login(c, "admin", "admin-pw")
     rv = c.get("/admin")
     assert rv.status_code == 200
     assert b"No jobs" in rv.data
@@ -661,7 +679,7 @@ def test_admin_page_empty_state(make_app):
 
 def test_logout_clears_session(make_app):
     c = make_auth_client(make_app)
-    login(c, "user-pw")
+    login(c, "user", "user-pw")
     assert c.get("/").status_code == 200
     assert c.get("/logout").status_code == 302
     assert c.get("/").status_code == 302
@@ -669,38 +687,12 @@ def test_logout_clears_session(make_app):
 
 def test_admin_nav_link_only_for_admin(make_app):
     admin_client = make_auth_client(make_app)
-    login(admin_client, "admin-pw")
+    login(admin_client, "admin", "admin-pw")
     assert b'href="/admin"' in admin_client.get("/").data
 
     user_client = make_auth_client(make_app)
-    login(user_client, "user-pw")
+    login(user_client, "user", "user-pw")
     assert b'href="/admin"' not in user_client.get("/").data
-
-
-def test_empty_configured_user_password_never_authenticates(make_app):
-    app_ = make_app(user_password="", admin_password="admin-pw")
-    c = app_.test_client()
-    rv = c.post("/login", data={"password": ""})
-    assert rv.status_code == 401
-    assert b"Incorrect password." in rv.data
-    assert c.get("/").status_code == 302
-
-
-def test_empty_admin_password_falls_back_to_user(make_app):
-    app_ = make_app(user_password="user-pw", admin_password="")
-    c = app_.test_client()
-    rv = c.post("/login", data={"password": "user-pw"})
-    assert rv.status_code == 302
-    assert c.get("/").status_code == 200
-    assert c.get("/admin").status_code == 403
-
-
-def test_identical_user_and_admin_passwords_grant_admin(make_app):
-    app_ = make_app(user_password="same", admin_password="same")
-    c = app_.test_client()
-    rv = c.post("/login", data={"password": "same"})
-    assert rv.status_code == 302
-    assert c.get("/admin").status_code == 200
 
 
 def test_session_cookie_samesite_is_lax(make_app):
@@ -709,9 +701,12 @@ def test_session_cookie_samesite_is_lax(make_app):
 
 
 def test_unauthenticated_api_endpoints_denied(make_app):
-    app_ = make_app(user_password="user-pw", admin_password="admin-pw")
+    app_ = make_app(
+        seed_admin_username="admin", seed_admin_password="admin-pw",
+        seed_user_username="user", seed_user_password="user-pw",
+    )
     admin = app_.test_client()
-    login(admin, "admin-pw")
+    login(admin, "admin", "admin-pw")
     job_id = upload(admin)
     complete_job(admin, job_id)  # DONE + report.md present: otherwise reachable
     anon = app_.test_client()
@@ -729,7 +724,10 @@ def test_unauthenticated_api_endpoints_denied(make_app):
 
 
 def test_unauthenticated_upload_redirects_and_creates_no_job(make_app, tmp_path):
-    app_ = make_app(user_password="user-pw", admin_password="admin-pw")
+    app_ = make_app(
+        seed_admin_username="admin", seed_admin_password="admin-pw",
+        seed_user_username="user", seed_user_password="user-pw",
+    )
     anon = app_.test_client()
     rv = anon.post("/jobs", data={"pdf": (io.BytesIO(PDF_BYTES), "com.pdf")})
     assert rv.status_code == 302
@@ -740,7 +738,7 @@ def test_unauthenticated_upload_redirects_and_creates_no_job(make_app, tmp_path)
 
 def test_admin_page_escapes_job_error_and_pdf_name(make_app):
     c = make_auth_client(make_app)
-    login(c, "admin-pw")
+    login(c, "admin", "admin-pw")
     job_id = upload(c, filename="<script>evil.pdf")
     registry_for(c).transition(
         job_id, status=FAILED, error='<script>alert("&")</script>'
@@ -750,3 +748,68 @@ def test_admin_page_escapes_job_error_and_pdf_name(make_app):
     assert b"<script>" not in rv.data
     assert b"&lt;script&gt;" in rv.data
     assert b"&amp;" in rv.data
+
+
+# ----------------------------------------------------- seeding / startup guards
+
+
+def test_login_hostile_username_returns_generic_401(make_app):
+    c = make_auth_client(make_app)
+    rv = c.post(
+        "/login",
+        data={"username": "alice' OR '1'='1", "password": "user-pw"},
+    )
+    assert rv.status_code == 401
+    assert b"Incorrect username or password." in rv.data
+
+
+def test_seeding_skipped_once_users_exist(make_app, tmp_path):
+    # Pre-create a user in the DB that create_app will open: seeding must be
+    # skipped entirely, so the seeded credentials never exist.
+    db = Database(tmp_path / "a2t.db")
+    db.init()
+    db.create_user("existing", "pw", "admin")
+    app_ = make_app(
+        seed_admin_username="admin", seed_admin_password="admin-pw",
+        seed_user_username="user", seed_user_password="user-pw",
+    )
+    db2 = app_.extensions["a2t_db"]
+    assert db2.count_users() == 1
+    assert db2.get_user_by_username("existing") is not None
+    assert db2.get_user_by_username("admin") is None
+    assert db2.get_user_by_username("user") is None
+
+
+def test_seeding_same_admin_and_user_username_keeps_admin(make_app):
+    app_ = make_app(
+        seed_admin_username="same", seed_admin_password="admin-pw",
+        seed_user_username="same", seed_user_password="user-pw",
+    )
+    db = app_.extensions["a2t_db"]
+    assert db.count_users() == 1
+    assert db.get_user_by_username("same")["role"] == "admin"
+    c = app_.test_client()
+    assert c.post(
+        "/login", data={"username": "same", "password": "admin-pw"}
+    ).status_code == 302
+    assert c.post(
+        "/login", data={"username": "same", "password": "user-pw"}
+    ).status_code == 401
+
+
+def test_main_exits_cleanly_on_broken_db(monkeypatch, tmp_path, capsys):
+    """A database that cannot be opened must fail fast with a one-line
+    message (exit 1), not a raw traceback — and must never serve open."""
+    bad_path = tmp_path / "db-dir"  # a directory where the DB file should be
+    bad_path.mkdir()
+    settings = WebSettings(
+        data_dir=tmp_path,
+        cache_dir=tmp_path / "cache",
+        max_workers=1,
+        db_path=bad_path,
+    )
+    monkeypatch.setattr(app_module, "settings_from_env", lambda: settings)
+    with pytest.raises(SystemExit) as excinfo:
+        app_module.main()
+    assert excinfo.value.code == 1
+    assert "database" in capsys.readouterr().err

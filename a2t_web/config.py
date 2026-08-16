@@ -1,9 +1,10 @@
 """Runtime settings for the web app, built from environment variables.
 
-Password files (``user-password`` / ``admin-password``) are read from the
-secrets dir (``A2T_WEB_SECRETS_DIR``, default ``.secrets``) and are required:
-a missing or empty-after-trim file raises ``ValueError`` so the app fails
-closed at startup.
+Users are seeded into the SQLite database on first run from the
+``A2T_ADMIN_*`` / ``A2T_USER_*`` environment variables. The legacy
+``.secrets/user-password`` / ``.secrets/admin-password`` files are no longer
+read; the OpenRouter key handling in ``a2t.config`` (``.secrets/openrouter-key``)
+is unrelated and unchanged.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ _ENV_FOR = {
     "job_ttl_hours": "A2T_WEB_JOB_TTL_HOURS",
     "poll_seconds": "A2T_WEB_POLL_SECONDS",
     "port": "A2T_WEB_PORT",
-    "secrets_dir": "A2T_WEB_SECRETS_DIR",
     "secret_key": "A2T_WEB_SECRET_KEY",
 }
 
@@ -39,33 +39,12 @@ class WebSettings:
     poll_seconds: int = 2
     host: str = "127.0.0.1"
     port: int = 5000
-    secrets_dir: Path = Path(".secrets")
-    user_password: str = ""
-    admin_password: str = ""
+    db_path: Path = DEFAULT_DATA_DIR / "a2t.db"
+    seed_admin_username: str = "admin"
+    seed_admin_password: str = ""  # set A2T_ADMIN_PASSWORD to seed an admin
+    seed_user_username: str = "user"
+    seed_user_password: str = ""  # set A2T_USER_PASSWORD to seed a normal user
     secret_key: str | None = None  # Flask session signing; None → random per process
-
-
-def _read_secret(secrets_dir: Path, name: str) -> str:
-    """Read and trim one password file; raise ValueError when unusable.
-
-    Only the file path (never the contents) is mentioned in errors, so a
-    leaked exception message cannot reveal a password.
-    """
-    path = secrets_dir / name
-    if not path.is_file():
-        raise ValueError(
-            f"Missing password file {path}. Create {secrets_dir / 'user-password'} and "
-            f"{secrets_dir / 'admin-password'} to enable access control, then restart."
-        )
-    try:
-        value = path.read_text(encoding="utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise ValueError(
-            f"Password file {path} is not valid UTF-8; write it as plain text."
-        ) from exc
-    if not value:
-        raise ValueError(f"Password file {path} is empty; set a non-empty password.")
-    return value
 
 
 def settings_from_env() -> WebSettings:
@@ -79,7 +58,10 @@ def settings_from_env() -> WebSettings:
         "host": env.get("A2T_WEB_HOST"),
         "port": env.get("A2T_WEB_PORT"),
         "cache_dir": env.get("A2T_CACHE"),
-        "secrets_dir": env.get("A2T_WEB_SECRETS_DIR"),
+        "seed_admin_username": env.get("A2T_ADMIN_USERNAME"),
+        "seed_admin_password": env.get("A2T_ADMIN_PASSWORD"),
+        "seed_user_username": env.get("A2T_USER_USERNAME"),
+        "seed_user_password": env.get("A2T_USER_PASSWORD"),
         "secret_key": env.get("A2T_WEB_SECRET_KEY"),
     }
     values: dict[str, str | int | Path] = {}
@@ -93,16 +75,12 @@ def settings_from_env() -> WebSettings:
                 raise ValueError(
                     f"{_ENV_FOR[key]} must be an integer, got {value!r}"
                 ) from None
-        elif key in {"data_dir", "cache_dir", "secrets_dir"}:
+        elif key in {"data_dir", "cache_dir"}:
             values[key] = Path(value)
         else:
             values[key] = value
-    values["user_password"] = _read_secret(
-        values.get("secrets_dir", Path(".secrets")), "user-password"
-    )
-    values["admin_password"] = _read_secret(
-        values.get("secrets_dir", Path(".secrets")), "admin-password"
-    )
+    data_dir = Path(values.get("data_dir", DEFAULT_DATA_DIR))
+    values.setdefault("db_path", data_dir / "a2t.db")
     settings = WebSettings(**values)
     if settings.max_workers > 1:
         raise ValueError(

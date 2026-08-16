@@ -8,8 +8,8 @@ and redirects to a status page that polls the JSON API.
 from __future__ import annotations
 
 import atexit
-import hmac
 import secrets
+import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -26,11 +26,13 @@ from flask import (
     url_for,
 )
 
-from a2t_web import joblog, storage
+from a2t_web import db as db_module
+from a2t_web import storage
 from a2t_web.config import WebSettings, settings_from_env
 from a2t_web.jobs import CANCELLED, DONE, JobRegistry
 from a2t_web.pipeline import artifact_titles, tail
 from a2t_web.sanity import SanityError, sanity_check
+from a2t_web.users import seed_users
 from a2t_web.worker import Worker
 
 ADMIN_LOG_LIMIT = 200
@@ -60,6 +62,10 @@ def create_app(settings: WebSettings | None = None) -> Flask:
     settings = settings or settings_from_env()
     storage.ensure_data_dirs(settings.data_dir)
 
+    db = db_module.Database(settings.db_path)
+    db.init()
+    seed_users(settings, db)
+
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = settings.max_upload_bytes
     # Pin SameSite=Lax (per IMPLEMENTATION_PLAN §3.4) instead of relying on
@@ -70,13 +76,14 @@ def create_app(settings: WebSettings | None = None) -> Flask:
     # Random per-process key unless the operator pins one; a fixed
     # A2T_WEB_SECRET_KEY keeps sessions valid across restarts.
     app.secret_key = settings.secret_key or secrets.token_hex(32)
-    auth_enabled = bool(settings.user_password or settings.admin_password)
-    job_log_path = settings.data_dir / "jobs.log"
+    # Auth is on iff the users table has any users; an empty table = open mode.
+    auth_enabled = db.count_users() > 0
 
-    registry = JobRegistry(log_path=job_log_path)
+    registry = JobRegistry(db=db)
     worker = Worker(registry, settings)
     app.extensions["a2t_jobs"] = registry
     app.extensions["a2t_worker"] = worker
+    app.extensions["a2t_db"] = db
 
     app.jinja_env.filters["basename"] = storage.safe_basename
     app.jinja_env.filters["human_ts"] = human_ts
@@ -110,25 +117,20 @@ def create_app(settings: WebSettings | None = None) -> Flask:
     def login_post():
         if not auth_enabled:
             return redirect(url_for("index"))
+        username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
-        pw = password.encode("utf-8")
-        # Check the admin password first so an operator who sets the same
-        # value for both files gets the admin role; a role whose configured
-        # password is empty is never matched, so an empty configured password
-        # cannot authenticate anyone.
-        if settings.admin_password and hmac.compare_digest(
-            pw, settings.admin_password.encode("utf-8")
-        ):
-            role = "admin"
-        elif settings.user_password and hmac.compare_digest(
-            pw, settings.user_password.encode("utf-8")
-        ):
-            role = "user"
-        else:
-            return render_template("login.html", error="Incorrect password."), 401
+        user = db.verify_login(username, password)
+        if user is None:
+            return (
+                render_template(
+                    "login.html", error="Incorrect username or password."
+                ),
+                401,
+            )
         session.clear()
         session["authenticated"] = True
-        session["role"] = role
+        session["role"] = user["role"]
+        session["username"] = user["username"]
         next_url = request.form.get("next")
         if next_url and next_url.startswith("/") and not next_url.startswith("//") \
                 and "\\" not in next_url:
@@ -144,7 +146,7 @@ def create_app(settings: WebSettings | None = None) -> Flask:
     def admin():
         if auth_enabled and session.get("role") != "admin":
             abort(403)
-        entries = joblog.read_entries(job_log_path, limit=ADMIN_LOG_LIMIT)
+        entries = db.list_jobs(limit=ADMIN_LOG_LIMIT)
         return render_template("admin.html", entries=entries)
 
     def render_index_error(message: str, status: int):
@@ -312,10 +314,16 @@ def create_app(settings: WebSettings | None = None) -> Flask:
 def main() -> None:
     try:
         settings = settings_from_env()
+        app = create_app(settings)
     except ValueError as exc:
         print(f"a2t-web: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
-    app = create_app(settings)
+    except (sqlite3.DatabaseError, OSError) as exc:
+        # Broken/unwritable data dir or corrupt/unopenable database: fail fast
+        # with a one-line message instead of a raw traceback. Nothing serves,
+        # so there is no auth bypass.
+        print(f"a2t-web: cannot open the database: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
     atexit.register(app.extensions["a2t_worker"].shutdown)
     app.run(host=settings.host, port=settings.port, threaded=True)
 

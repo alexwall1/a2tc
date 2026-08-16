@@ -1,5 +1,7 @@
-"""settings_from_env: env parsing errors, the max_workers invariant, and the
-password-file secrets handling."""
+"""settings_from_env: env parsing errors, the max_workers invariant, the seed
+user/password variables, and the derived db_path."""
+
+from pathlib import Path
 
 import pytest
 
@@ -14,36 +16,22 @@ _ALL_ENV = (
     "A2T_WEB_HOST",
     "A2T_WEB_PORT",
     "A2T_CACHE",
-    "A2T_WEB_SECRETS_DIR",
     "A2T_WEB_SECRET_KEY",
+    "A2T_ADMIN_USERNAME",
+    "A2T_ADMIN_PASSWORD",
+    "A2T_USER_USERNAME",
+    "A2T_USER_PASSWORD",
 )
 
 
 @pytest.fixture(autouse=True)
-def secrets_env(tmp_path, monkeypatch):
-    """Every settings_from_env call needs password files present.
-
-    A fresh tmp secrets dir with `user-password`/`admin-password` is created
-    and pointed at via `A2T_WEB_SECRETS_DIR`; all other A2T_WEB_* vars are
-    cleared so stray host environment cannot leak into a test.
-    """
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (secrets_dir / "user-password").write_text("user")
-    (secrets_dir / "admin-password").write_text("admin")
+def clean_env(monkeypatch):
+    """Clear every A2T_* var so stray host environment cannot leak in."""
     for name in _ALL_ENV:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("A2T_WEB_SECRETS_DIR", str(secrets_dir))
 
 
-def test_settings_from_env_defaults(monkeypatch):
-    # Delete every env var except A2T_WEB_SECRETS_DIR: the autouse fixture
-    # points that one at a real tmp secrets dir so settings_from_env can read
-    # the password files instead of failing closed on the default `.secrets`.
-    for name in _ALL_ENV:
-        if name == "A2T_WEB_SECRETS_DIR":
-            continue
-        monkeypatch.delenv(name, raising=False)
+def test_settings_from_env_defaults():
     settings = settings_from_env()
     assert settings.max_workers == 1
     assert settings.job_timeout == 3600
@@ -52,6 +40,11 @@ def test_settings_from_env_defaults(monkeypatch):
     assert settings.port == 5000
     assert settings.host == "127.0.0.1"
     assert settings.secret_key is None
+    assert settings.seed_admin_username == "admin"
+    assert settings.seed_admin_password == ""
+    assert settings.seed_user_username == "user"
+    assert settings.seed_user_password == ""
+    assert settings.db_path == Path("./webapp-data") / "a2t.db"
 
 
 def test_settings_from_env_parses_valid_values(monkeypatch):
@@ -79,65 +72,41 @@ def test_settings_from_env_max_workers_one_accepted(monkeypatch):
     assert settings_from_env().max_workers == 1
 
 
-# ---------------------------------------------------------------- password files
+# ------------------------------------------------------------- seed variables
 
 
-def test_settings_reads_passwords_from_secrets_dir(monkeypatch):
+def test_settings_from_env_seed_vars_parsed(monkeypatch):
+    monkeypatch.setenv("A2T_ADMIN_USERNAME", "root")
+    monkeypatch.setenv("A2T_ADMIN_PASSWORD", "admin-secret")
+    monkeypatch.setenv("A2T_USER_USERNAME", "alice")
+    monkeypatch.setenv("A2T_USER_PASSWORD", "user-secret")
     settings = settings_from_env()
-    assert settings.user_password == "user"
-    assert settings.admin_password == "admin"
+    assert settings.seed_admin_username == "root"
+    assert settings.seed_admin_password == "admin-secret"
+    assert settings.seed_user_username == "alice"
+    assert settings.seed_user_password == "user-secret"
 
 
-def test_settings_missing_password_file_raises(tmp_path, monkeypatch):
-    empty = tmp_path / "empty-secrets"
-    empty.mkdir()
-    monkeypatch.setenv("A2T_WEB_SECRETS_DIR", str(empty))
-    with pytest.raises(ValueError, match="user-password"):
-        settings_from_env()
-
-
-def test_settings_empty_password_file_raises(tmp_path, monkeypatch):
-    secrets = tmp_path / "secrets-empty"
-    secrets.mkdir()
-    (secrets / "user-password").write_text("ok")
-    (secrets / "admin-password").write_text("\n")
-    monkeypatch.setenv("A2T_WEB_SECRETS_DIR", str(secrets))
-    with pytest.raises(ValueError, match="empty"):
-        settings_from_env()
-
-
-def test_settings_non_utf8_password_file_raises(tmp_path, monkeypatch):
-    secrets = tmp_path / "secrets-bad-utf8"
-    secrets.mkdir()
-    (secrets / "user-password").write_text("user")
-    # UTF-16 byte order mark + content: not valid UTF-8, must not blow up
-    # with a raw UnicodeDecodeError that main() would not format.
-    (secrets / "admin-password").write_bytes(b"\xff\xfeP\x00w\x00")
-    monkeypatch.setenv("A2T_WEB_SECRETS_DIR", str(secrets))
-    with pytest.raises(ValueError, match="admin-password"):
-        settings_from_env()
-
-
-def test_settings_strips_password_whitespace(tmp_path, monkeypatch):
-    secrets = tmp_path / "secrets-ws"
-    secrets.mkdir()
-    (secrets / "user-password").write_text("  pw  \n")
-    (secrets / "admin-password").write_text(" admin-pw \n")
-    monkeypatch.setenv("A2T_WEB_SECRETS_DIR", str(secrets))
+def test_settings_from_env_seed_usernames_default_when_unset():
     settings = settings_from_env()
-    assert settings.user_password == "pw"
-    assert settings.admin_password == "admin-pw"
+    assert settings.seed_admin_username == "admin"
+    assert settings.seed_user_username == "user"
 
 
-def test_settings_secrets_dir_env_override(tmp_path, monkeypatch):
-    other = tmp_path / "other-secrets"
-    other.mkdir()
-    (other / "user-password").write_text("other-user")
-    (other / "admin-password").write_text("other-admin")
-    monkeypatch.setenv("A2T_WEB_SECRETS_DIR", str(other))
+def test_settings_from_env_seed_passwords_unset_by_default():
     settings = settings_from_env()
-    assert settings.user_password == "other-user"
-    assert settings.admin_password == "other-admin"
+    assert settings.seed_admin_password == ""
+    assert settings.seed_user_password == ""
+
+
+# ------------------------------------------------------------- db_path
+
+
+def test_settings_from_env_db_path_follows_data_dir(monkeypatch):
+    monkeypatch.setenv("A2T_WEB_DATA_DIR", "/srv/a2t/data")
+    settings = settings_from_env()
+    assert settings.data_dir == Path("/srv/a2t/data")
+    assert settings.db_path == Path("/srv/a2t/data") / "a2t.db"
 
 
 def test_settings_accepts_fixed_secret_key(monkeypatch):
