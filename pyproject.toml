@@ -22,7 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "flask>=3.0"]
-web = ["flask>=3.0"]
+web = ["flask>=3.0", "gunicorn>=21"]
 
 [project.scripts]
 a2t = "a2t.cli:main"
