@@ -6,7 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-KEY_FILENAME = ".openrouter_key"
+KEY_FILENAME = ".openrouter_key"  # legacy fallback, kept for backwards compatibility
+KEY_SECRETS_RELATIVE = Path(".secrets") / "openrouter-key"
 KEY_ENV = "OPENROUTER_API_KEY"
 MODEL_ENV = "A2T_MODEL"
 
@@ -43,25 +44,26 @@ class Settings:
     def require_key(self) -> str:
         if not self.api_key:
             raise ConfigError(
-                f"no OpenRouter API key: set {KEY_ENV} or create {KEY_FILENAME} "
+                f"no OpenRouter API key: set {KEY_ENV} or create {KEY_SECRETS_RELATIVE} "
                 f"in the project root"
             )
         return self.api_key
 
 
 def find_key(start: Path | None = None) -> str | None:
-    """The API key from the environment, or from `.openrouter_key` walking upwards."""
+    """The API key from the environment, or from `.secrets/openrouter-key` walking upwards."""
     from_env = os.environ.get(KEY_ENV)
     if from_env and from_env.strip():
         return from_env.strip()
 
     here = (start or Path.cwd()).resolve()
     for directory in [here, *here.parents]:
-        candidate = directory / KEY_FILENAME
-        if candidate.is_file():
-            key = candidate.read_text(encoding="utf-8").strip()
-            if key:
-                return key
+        for name in (KEY_SECRETS_RELATIVE, KEY_FILENAME):
+            candidate = directory / name
+            if candidate.is_file():
+                key = candidate.read_text(encoding="utf-8").strip()
+                if key:
+                    return key
     return None
 
 

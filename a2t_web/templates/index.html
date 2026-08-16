@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Upload a proposal — A2T Web{% endblock %}
+{% block content %}
+  <h1>A2T Web</h1>
+  <p>Upload an EU Commission proposal (a COM document, PDF) to convert it into
+  tracked-changes Word documents. The conversion runs in the background; you
+  are taken to a status page you can keep open.</p>
+  {% if error %}
+  <p class="error" role="alert">{{ error }}</p>
+  {% endif %}
+  <form id="upload-form" method="post" action="{{ url_for('upload') }}"
+        enctype="multipart/form-data" data-max-bytes="{{ max_upload_bytes }}">
+    <label for="pdf">Proposal PDF</label>
+    <input type="file" id="pdf" name="pdf" accept=".pdf" required>
+    <button type="submit">Convert</button>
+  </form>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      wireUploadForm("upload-form", "pdf");
+    });
+  </script>
+{% endblock %}

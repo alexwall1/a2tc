@@ -273,7 +273,22 @@ def test_key_read_from_environment(monkeypatch, tmp_path):
 
 def test_key_read_from_file(monkeypatch, tmp_path):
     monkeypatch.delenv(KEY_ENV, raising=False)
-    (tmp_path / ".openrouter_key").write_text("sk-or-from-file\n")
+    (tmp_path / ".secrets").mkdir()
+    (tmp_path / ".secrets" / "openrouter-key").write_text("sk-or-from-file\n")
+    assert find_key(tmp_path) == "sk-or-from-file"
+
+
+def test_key_read_from_legacy_file(monkeypatch, tmp_path):
+    monkeypatch.delenv(KEY_ENV, raising=False)
+    (tmp_path / ".openrouter_key").write_text("sk-or-from-legacy\n")
+    assert find_key(tmp_path) == "sk-or-from-legacy"
+
+
+def test_secrets_file_takes_priority_over_legacy(monkeypatch, tmp_path):
+    monkeypatch.delenv(KEY_ENV, raising=False)
+    (tmp_path / ".secrets").mkdir()
+    (tmp_path / ".secrets" / "openrouter-key").write_text("sk-or-from-file\n")
+    (tmp_path / ".openrouter_key").write_text("sk-or-from-legacy\n")
     assert find_key(tmp_path) == "sk-or-from-file"
 
 
@@ -281,7 +296,8 @@ def test_missing_key_raises_actionable_error(monkeypatch, tmp_path):
     from a2t.config import ConfigError
 
     monkeypatch.delenv(KEY_ENV, raising=False)
-    with pytest.raises(ConfigError, match="OPENROUTER_API_KEY"):
+    with pytest.raises(ConfigError,
+                       match=r"OPENROUTER_API_KEY.*\.secrets/openrouter-key"):
         Settings(api_key=None).require_key()
 
 

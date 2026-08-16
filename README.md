@@ -42,6 +42,61 @@ silently.
 
 Base-act retrieval dominates the runtime; expect a couple of minutes.
 
+## Web app
+
+A small self-hosted web front end for the conversion pipeline: upload a COM
+PDF, get an immediate sanity check, and watch the background conversion on a
+status page that polls the JSON API (no long-lived connections). It binds to
+`127.0.0.1` only.
+
+```bash
+.venv/bin/pip install -e ".[web]"
+.venv/bin/a2t-web
+```
+
+Then open <http://127.0.0.1:5000>, upload a proposal, and keep the status page
+open until the tracked-changes documents and `report.md` are ready to download.
+
+- Uploads, job logs, and results live in `./webapp-data` by default;
+  `A2T_WEB_DATA_DIR` overrides the location.
+- The web app runs the pipeline with the LLM tier (`--llm`) enabled, so an
+  OpenRouter key must be available to the worker process: set
+  `OPENROUTER_API_KEY` in the environment that starts `a2t-web`, or place
+  `.secrets/openrouter-key` in the directory where you start it.
+- Bind to `127.0.0.1` only. Exposing it on the LAN (`A2T_WEB_HOST=0.0.0.0`)
+  exposes upload and download endpoints — don't. With passwords configured the
+  app is no longer unauthenticated on the LAN, but localhost-only binding is
+  still recommended.
+- The pipeline runs as a single background subprocess at a time
+  (`A2T_WEB_MAX_WORKERS` defaults to 1) so concurrent runs cannot race on the
+  shared retrieval cache.
+
+### Access control
+
+`a2t-web` is password-gated: every page and every `/api/*` endpoint requires a
+signed-in session once passwords are configured. Create the two password files
+next to where the app is started (before running it — startup fails fast if
+either is missing or empty):
+
+```bash
+mkdir -p .secrets
+printf 'mypassword' > .secrets/user-password
+printf 'myadminpassword' > .secrets/admin-password
+```
+
+- Both files are required. `A2T_WEB_SECRETS_DIR` overrides the `.secrets`
+  location.
+- The same login form accepts either password: the user password signs you in
+  with role `user`, the admin password with role `admin`.
+- `GET /admin` shows a durable, server-rendered log of every job that has been
+  run (id, file, status, timestamps, error), newest first, capped at 200
+  entries; it survives restarts and cleaned-up jobs. It requires the admin
+  password; a plain user gets a 403.
+- `GET /logout` clears your session. Sessions are signed cookies; the default
+  signing key is random per process (everyone re-logs in after a restart).
+  Set `A2T_WEB_SECRET_KEY` to a fixed value to keep sessions valid across
+  restarts.
+
 ## Options
 
 `a2t convert PDF`:
@@ -57,7 +112,8 @@ Base-act retrieval dominates the runtime; expect a couple of minutes.
 | `--recitals` | Insert the proposal's own preamble ahead of the articles, as tracked insertions. Off by default — see below. |
 
 The LLM tier is optional and needs an OpenRouter key, from `$OPENROUTER_API_KEY` or
-a `.openrouter_key` file in the project root. Without `--llm` the app is entirely
+a `.secrets/openrouter-key` file in the project root (a legacy `.openrouter_key`
+file is still recognized). Without `--llm` the app is entirely
 offline apart from EUR-Lex retrieval.
 
 ## Recitals
