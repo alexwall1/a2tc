@@ -82,3 +82,23 @@ the corpus.
   and deletions are not compared.
 - Eleven of the triples amend Directive 2003/87/EC, the act the rules were developed
   against. They are in the figures.
+
+## After reading the older template's paragraphs, points and indents
+
+Same triples, rerun at `05b6f1a`. This time 87 of the 87 documents downloaded, so the
+full figures are not comparable with the table above; the comparison below is on the 71
+documents that ran both times.
+
+| | Before | After |
+|---|---|---|
+| Resolved | 903 of 1348 (67.0%) | 1091 of 1348 (80.9%) |
+| Agreement with the published consolidation | 178 of 275 (64.7%) | 245 of 357 (68.6%) |
+
+No document resolved fewer instructions or agreed on fewer provisions than before.
+The agreement figures have different denominators: more instructions now resolve, so
+more of them can be compared. Full run on all 87 documents: 1241 of 1512 resolved
+(82.1%), 287 of 407 in agreement (70.5%).
+
+What remains, largest first: 235 unresolved targets in total, 37 unclassified
+instructions, 34 documents in which no amended act is detected, 34 with no addressable
+target and 34 whose target phrase could not be parsed.
