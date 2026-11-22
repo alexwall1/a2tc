@@ -206,6 +206,62 @@ def _build_article(subdivision) -> Node | None:
     return article
 
 
+# "1.  Provided the …" — the older template's numbered paragraph, number and text in
+# one block. Hyphenated keys ("3-a") are the form the ETS Directive uses.
+LEADING_PARAGRAPH_NUMBER = re.compile(r"^(?P<key>\d+(?:-?[a-z]+)?)\.\s+(?P<rest>\S.*)$", re.S)
+# "(a)  vehicles owned …", "(ii)  …", "—  ‘motor vehicle’: …" — a list item whose
+# marker sits at the head of its own text.
+INDENTED_ITEM = re.compile(
+    r"^(?:\((?P<key>[a-z]{1,3}|[ivx]{1,5}|\d{1,2})\)|(?P<dash>[—–-]))\s*(?P<rest>.*)$", re.S)
+ROMAN = re.compile(r"^(?:i{1,3}|iv|vi{0,3}|ix|x)$")
+
+
+def _is_indented_list(el) -> bool:
+    """A `div` the older template indents to mark list items, with items inside."""
+    return (
+        el.tag == "div"
+        and "margin-left" in (el.get("style") or "")
+        and any(_has_class(p, "norm") for p in el.iter("p"))
+    )
+
+
+def _add_indented_item(parent: Node, last_point: Node | None, in_subpoints: bool,
+                       item, provenance: str | None) -> tuple[Node | None, bool]:
+    """Add one item of an indented list and return the list's running state.
+
+    The older template carries no class for depth and its margins vary from act to act
+    (24, 30, 36, 42 pt for the same level), so depth is read from the marker instead:
+    a roman numeral that cannot be the next letter of the run opens or continues a
+    level of sub-points. "(i)" after "(h)" is a letter; "(i)" after "(c)" is not.
+    """
+    text = clean_text(item)
+    match = INDENTED_ITEM.match(text)
+    if match is None:
+        # An item with no marker is a further paragraph of the one above it.
+        if text:
+            (last_point or parent).add(
+                Node(Kind.SUBPARAGRAPH, text=text, provenance=provenance))
+        return last_point, in_subpoints
+
+    key = match.group("key") or "—"  # the dash is its own marker, as in the grid list
+    rest = match.group("rest").strip()
+    roman = bool(match.group("key")) and ROMAN.match(match.group("key")) is not None
+    continues_letters = (
+        last_point is not None and not in_subpoints
+        and match.group("key") == "i" and last_point.key == "h"
+    )
+    nested = (
+        last_point is not None and roman and not continues_letters
+        and (in_subpoints or match.group("key") == "i")
+    )
+    if nested:
+        last_point.add(Node(Kind.SUBPOINT, key=key, text=rest, provenance=provenance))
+        return last_point, True
+
+    point = parent.add(Node(Kind.POINT, key=key, text=rest, provenance=provenance))
+    return point, False
+
+
 def _populate_article(article: Node, blocks) -> Node:
     """Attach paragraphs, subparagraphs and points to an article.
 
@@ -214,6 +270,8 @@ def _populate_article(article: Node, blocks) -> Node:
     """
     current: Node = article  # where loose subparagraphs and points attach
     provenance: str | None = None
+    last_point: Node | None = None  # the point a following sub-point would belong to
+    in_subpoints = False
 
     for child in blocks:
         if not isinstance(child.tag, str):
@@ -245,7 +303,7 @@ def _populate_article(article: Node, blocks) -> Node:
             body = child.find_class("norm inline-element")
             source = body[0] if body else child
             _add_body(paragraph, source)
-            current = paragraph
+            current, last_point, in_subpoints = paragraph, None, False
             continue
 
         if _has_class(child, "grid-container"):
@@ -254,8 +312,45 @@ def _populate_article(article: Node, blocks) -> Node:
 
         if child.tag == "p" and _has_class(child, "norm"):
             text = clean_text(child)
+            numbered = LEADING_PARAGRAPH_NUMBER.match(text)
+            if numbered:
+                # Older consolidations print "1.  Provided the objectives…" as one
+                # block with the number inside it, where the current template gives
+                # the number an element of its own. Read as a plain subparagraph, the
+                # number is part of its text and no "paragraph 1" exists to address —
+                # which is where two thirds of Regulation 561/2006's amendments, and
+                # most of those to 2015/757, 2011/83 and 2017/745, went unplaced.
+                paragraph = article.add(Node(
+                    Kind.PARAGRAPH, key=numbered.group("key"), provenance=provenance))
+                paragraph.add(Node(Kind.SUBPARAGRAPH, text=numbered.group("rest"),
+                                   provenance=provenance))
+                current, last_point, in_subpoints = paragraph, None, False
+            elif text:
+                current.add(Node(Kind.SUBPARAGRAPH, text=text, provenance=provenance))
+            continue
+
+        if child.tag == "p" and _has_class(child, "list"):
+            # Closing words after a list of points ("These vehicles shall be used
+            # only within …") belong to the provision holding the list.
+            text = clean_text(child)
             if text:
                 current.add(Node(Kind.SUBPARAGRAPH, text=text, provenance=provenance))
+            continue
+
+        if child.tag == "div" and _is_indented_list(child):
+            for item in child.iter("p"):
+                if _has_class(item, "list"):
+                    # Words that qualify the item above them — "These vehicles shall
+                    # be used only within …" under point (d) — sit in the same div.
+                    text = clean_text(item)
+                    if text:
+                        (last_point or current).add(Node(
+                            Kind.SUBPARAGRAPH, text=text, provenance=provenance))
+                    continue
+                if not _has_class(item, "norm"):
+                    continue
+                last_point, in_subpoints = _add_indented_item(
+                    current, last_point, in_subpoints, item, provenance)
             continue
 
         # Any other block that carries points (e.g. a bare div.list of points).

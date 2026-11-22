@@ -431,3 +431,83 @@ def test_article_order_declines_to_guess():
     assert article_order(None) is None
     assert article_order("I") is None
     assert article_order("3(2)") is None
+
+
+# ----------------------------------------------- the older, flat consolidation template
+
+# Shaped after Article 13 of Regulation (EC) No 561/2006 as consolidated in 2015: the
+# paragraph number sits inside its first block, points are indented divs whose marker
+# opens the text, a qualifying paragraph sits in the div of the point it qualifies, and
+# a dash marks an indent. Checked in because the real documents are not.
+FLAT_ARTICLE = """
+<html><body>
+<p class="title-division-1">CHAPTER I</p>
+<p class="title-division-2">EXCEPTIONS</p>
+<p class="title-article-norm">Article 13</p>
+<p class="norm">1.  Each Member State may grant exceptions applicable to carriage by the following:</p>
+<div style="margin-left: 30pt; text-indent: -30pt"><p class="norm">(a)<span style="word-spacing: 18pt"> </span>vehicles owned by public authorities;</p></div>
+<div style="margin-left: 30pt; text-indent: -30pt"><p class="norm">(b)<span style="word-spacing: 18pt"> </span>vehicles used by undertakings:</p></div>
+<div style="margin-left: 42pt; text-indent: -42pt"><p class="norm">(i)<span style="word-spacing: 18pt"> </span>within 100 km;</p></div>
+<div style="margin-left: 42pt; text-indent: -42pt"><p class="norm">(ii)<span style="word-spacing: 18pt"> </span>for own account;</p></div>
+<p class="modref"><a href="#">▼M2</a></p>
+<div style="margin-left: 30pt; text-indent: -30pt"><p class="norm">(c)<span style="word-spacing: 18pt"> </span>tractors.</p>
+<p class="list">These vehicles shall be used only locally.</p></div>
+<p class="norm">2.  Member States shall inform the Commission.</p>
+<p class="norm">3.  The following are exempt:</p>
+<div style="margin-left: 12pt; text-indent: -12pt; "><p class="norm">—<span style="word-spacing: 0"> </span>regular services,</p></div>
+<div style="margin-left: 12pt; text-indent: -12pt; "><p class="norm">—<span style="word-spacing: 0"> </span>own-account operations.</p></div>
+<p class="norm">Carriage under this exemption may include a journey.</p>
+<p class="title-article-norm">Article 14</p>
+<p class="norm">Every driver shall comply.</p>
+</body></html>
+"""
+
+
+@pytest.fixture(scope="module")
+def flat():
+    return assemble(FLAT_ARTICLE, "TEST", "Test")
+
+
+def test_flat_template_reads_the_number_out_of_the_paragraph(flat):
+    article = flat.article("13")
+    assert [p.key for p in article.of_kind(Kind.PARAGRAPH)] == ["1", "2", "3"]
+    first = article.by_key(Kind.PARAGRAPH, "1")
+    assert first.children[0].text.startswith("Each Member State may grant")
+    assert "1." not in first.children[0].text.split()[0]
+
+
+def test_flat_template_reads_indented_points_and_their_depth(flat):
+    first = flat.article("13").by_key(Kind.PARAGRAPH, "1")
+    assert [p.key for p in first.of_kind(Kind.POINT)] == ["a", "b", "c"]
+    assert [s.key for s in first.by_key(Kind.POINT, "b").of_kind(Kind.SUBPOINT)] == ["i", "ii"]
+
+
+def test_flat_template_keeps_the_words_qualifying_a_point(flat):
+    point = flat.article("13").by_key(Kind.PARAGRAPH, "1").by_key(Kind.POINT, "c")
+    assert [c.text for c in point.of_kind(Kind.SUBPARAGRAPH)] == [
+        "These vehicles shall be used only locally."]
+
+
+def test_flat_template_reads_dash_indents_and_the_closing_words(flat):
+    third = flat.article("13").by_key(Kind.PARAGRAPH, "3")
+    assert [p.key for p in third.of_kind(Kind.POINT)] == ["—", "—"]
+    assert third.of_kind(Kind.SUBPARAGRAPH)[-1].text.startswith("Carriage under this")
+
+
+def test_flat_template_still_reads_an_article_with_no_numbered_paragraph(flat):
+    article = flat.article("14")
+    assert article.of_kind(Kind.PARAGRAPH) == []
+    assert [s.text for s in article.of_kind(Kind.SUBPARAGRAPH)] == ["Every driver shall comply."]
+
+
+def test_a_letter_i_after_h_is_a_point_not_a_sub_point():
+    def item(marker):
+        return ('<div style="margin-left: 30pt; text-indent: -30pt"><p class="norm">'
+                f'({marker})<span style="word-spacing: 18pt"> </span>text;</p></div>')
+
+    html = ('<html><body><p class="title-article-norm">Article 1</p>'
+            '<p class="norm">1.  The following:</p>'
+            + item("g") + item("h") + item("i") + item("j") + "</body></html>")
+    first = assemble(html, "TEST", "Test").article("1").by_key(Kind.PARAGRAPH, "1")
+    assert [p.key for p in first.of_kind(Kind.POINT)] == ["g", "h", "i", "j"]
+    assert first.by_key(Kind.POINT, "h").of_kind(Kind.SUBPOINT) == []
