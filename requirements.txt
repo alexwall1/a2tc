@@ -7,6 +7,8 @@
 click>=8.1
 python-docx>=1.2.0   # 1.2 adds Document.add_comment
 eurlex-builder==0.1.1  # pinned: we depend on its parquet output schema
+duckdb>=1.0,<2         # eurlex-builder breaks on DuckDB 2; see pyproject.toml
+pyyaml>=6.0
 polars>=1.0
 lxml>=5.0
 requests>=2.31

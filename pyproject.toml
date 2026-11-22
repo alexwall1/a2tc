@@ -15,6 +15,11 @@ dependencies = [
     "click>=8.1",
     "python-docx>=1.2.0",   # 1.2 adds Document.add_comment
     "eurlex-builder==0.1.1", # pinned: we depend on its parquet output schema
+    # eurlex-builder exports through `connection.pl()`, which DuckDB 2.0 removed, and
+    # declares no upper bound of its own — so a fresh install took 2.x and every
+    # retrieval failed at "Exporting results". Ours until the library pins it.
+    "duckdb>=1.0,<2",
+    "pyyaml>=6.0",          # retrieval/eurlex_builder.py writes the library's config
     "polars>=1.0",
     "lxml>=5.0",
     "requests>=2.31",
