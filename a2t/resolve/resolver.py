@@ -73,6 +73,9 @@ class Resolution:
     # 3-d, 3-c, and 3-b, ..."). Each is resolved; `node` stays None.
     nodes: list = field(default_factory=list)
     enumerated: bool = False
+    # The operation itself was not understood, so there was never a target to look
+    # for. Kept apart from "looked and did not find", which the LLM tier can help with.
+    unread: bool = False
 
     @property
     def ok(self) -> bool:
@@ -317,6 +320,29 @@ class Resolver:
             return
 
         scoped = self._context_for(instruction, context)
+
+        if instruction.op is Op.UNKNOWN:
+            # No rule read the operation, so there is no target either, and the walk
+            # below would land on the enclosing provision and call that resolved.
+            # It is not: nothing will be applied, and coverage has to say so. The
+            # enclosing provision is kept as the place to report it.
+            result = self._check(instruction, scoped)
+            result.status = "unresolved"
+            result.reason = "no rule matched this instruction"
+            result.unread = True
+            report.results.append(result)
+            # Whatever it was meant to contain was addressed relative to a target
+            # nobody read; resolving those against a guess would be worse than
+            # saying so.
+            for child in instruction.children:
+                for inner in child.walk():
+                    report.results.append(Resolution(
+                        inner, path=scoped, node=result.node, status="unresolved",
+                        unread=True,
+                        reason=f"inside instruction {instruction.id}, "
+                               f"which no rule matched",
+                    ))
+            return
 
         # "paragraphs 8 and 8a are deleted" — several targets. Without this the
         # phrase fails to parse and the instruction collapses onto its container,

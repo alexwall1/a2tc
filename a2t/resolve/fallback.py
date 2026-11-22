@@ -44,6 +44,10 @@ def apply_llm_fallback(report: ResolutionReport, act: Act,
     outcome = FallbackOutcome()
 
     for result in list(report.unresolved):
+        if result.unread:
+            # What failed here is reading the operation, not finding the provision.
+            # A chosen target would mark it resolved with nothing to apply.
+            continue
         if result.enumerated:
             # "paragraphs 3 and 4 are deleted" names several provisions. Asking for
             # one would silently drop the rest.

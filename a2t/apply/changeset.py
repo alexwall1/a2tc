@@ -516,7 +516,10 @@ def build_changes(resolution: Resolution,
         return [Change(ChangeKind.SKIPPED, instruction,
                        note=resolution.reason or "not applicable")]
     if not resolution.ok:
-        return [Change(ChangeKind.SKIPPED, instruction,
+        # Where the resolver got as far as a provision — the phrase was not in it, or
+        # the operation was not understood — that provision is where a reader should
+        # be told, so the node travels with the skip.
+        return [Change(ChangeKind.SKIPPED, instruction, node=resolution.node,
                        note=resolution.reason or "unresolved")]
 
     targets = resolution.targets

@@ -97,7 +97,9 @@ class DocumentResult:
             if act.error:
                 out.append(f"act failed: {_generalise(act.error)}")
             out += [f"unclassified instruction" for _ in range(act.unclassified)]
-            out += [f"unresolved target" for _ in range(act.applicable - act.resolved)]
+            # An unclassified instruction is unresolved too, and is already listed.
+            unplaced_targets = act.applicable - act.resolved - act.unclassified
+            out += [f"unresolved target" for _ in range(max(0, unplaced_targets))]
             out += [f"unplaced change" for _ in range(act.unplaced)]
             out += [_generalise(n) for n in act.skipped_notes]
         return out
