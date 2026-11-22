@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # pdftotext; the tests that read a PDF skip without a sample, but the ones
+      # that exercise the extractor's fallbacks call the binary.
+      - run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - run: pip install -e ".[dev]"
+      # The sample proposals are not in the repository, so this runs the tests that
+      # build their own input. -rs prints what was skipped and why.
+      - run: pytest -q -rs
