@@ -16,11 +16,16 @@ from a2t.extract.pdf import Line, extract_lines, to_lines
 
 PDF = Path(__file__).resolve().parents[1] / "amendment_proposal_ets.pdf"
 
-pytestmark = pytest.mark.skipif(not PDF.is_file(), reason="sample PDF not present")
+# Skipping lives on the fixtures that read the sample, not on the module: the tests
+# below that build their own input need no sample and must run on a fresh clone.
+MISSING = "sample PDF not present"
+needs_sample = pytest.mark.skipif(not PDF.is_file(), reason=MISSING)
 
 
 @pytest.fixture(scope="module")
 def lines():
+    if not PDF.is_file():
+        pytest.skip(MISSING)
     return extract_lines(PDF)
 
 
@@ -75,6 +80,7 @@ def test_most_lines_do_not_open_a_paragraph(lines):
     assert 0.05 < opening / body < 0.25
 
 
+@needs_sample
 def test_lines_survive_a_pdf_without_layout_analysis(monkeypatch):
     """The paragraph pass is an extra: if poppler cannot supply it, the lines are
     still the lines."""

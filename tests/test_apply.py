@@ -29,11 +29,13 @@ from a2t.parse.rules import classify_all
 from a2t.parse.segment import segment
 from a2t.resolve.resolver import Resolution, resolve_block
 
+from _samples import cached
+
 ROOT = FsPath(__file__).resolve().parents[1]
 PDF = ROOT / "amendment_proposal_ets.pdf"
 CACHE = {
-    "32003L0087": ROOT / "out" / "cache" / "02003L0087-20240301",
-    "32015D1814": ROOT / "out" / "cache" / "02015D1814-20240101",
+    "32003L0087": cached("02003L0087-20240301"),
+    "32015D1814": cached("02015D1814-20240101"),
 }
 
 
@@ -504,6 +506,17 @@ def test_unresolved_instruction_is_skipped_not_guessed():
     )[0]
     assert change.kind is ChangeKind.SKIPPED
     assert change.note == "nope"
+
+
+def test_a_skip_keeps_the_provision_the_resolver_reached():
+    """So the reader is told there, in a comment, rather than at the end."""
+    act = make_act()
+    change = build_changes(
+        Resolution(instruction(Op.UNKNOWN), node=act.article("3"),
+                   status="unresolved", reason="no rule matched this instruction")
+    )[0]
+    assert change.kind is ChangeKind.SKIPPED
+    assert change.node is act.article("3")
 
 
 def test_container_is_skipped_with_a_benign_note():

@@ -17,11 +17,15 @@ from a2t.extract.pdf import Line, extract_lines
 
 PDF = Path(__file__).resolve().parents[1] / "amendment_proposal_ets.pdf"
 
-pytestmark = pytest.mark.skipif(not PDF.is_file(), reason="sample PDF not present")
+# Skipping lives on the fixtures that read the sample, not on the module: the tests
+# below that build their own input need no sample and must run on a fresh clone.
+MISSING = "sample PDF not present"
 
 
 @pytest.fixture(scope="module")
 def lines():
+    if not PDF.is_file():
+        pytest.skip(MISSING)
     return extract_lines(PDF)
 
 

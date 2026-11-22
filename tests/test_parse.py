@@ -24,11 +24,15 @@ from a2t.parse.segment import (
 
 PDF = Path(__file__).resolve().parents[1] / "amendment_proposal_ets.pdf"
 
-pytestmark = pytest.mark.skipif(not PDF.is_file(), reason="sample PDF not present")
+# Skipping lives on the fixtures that read the sample, not on the module: the tests
+# below that build their own input need no sample and must run on a fresh clone.
+MISSING = "sample PDF not present"
 
 
 @pytest.fixture(scope="module")
 def parsed():
+    if not PDF.is_file():
+        pytest.skip(MISSING)
     lines = extract_lines(PDF)
     operative = operative_part(lines).lines
     blocks = segment(operative, detect_targets(operative, lines).targets)

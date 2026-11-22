@@ -22,21 +22,25 @@ from a2t.resolve.resolver import (
     targets_title,
 )
 
+from _samples import cached
+
 ROOT = FsPath(__file__).resolve().parents[1]
 PDF = ROOT / "amendment_proposal_ets.pdf"
 CACHE = {
-    "32003L0087": ROOT / "out" / "cache" / "02003L0087-20240301",
-    "32015D1814": ROOT / "out" / "cache" / "02015D1814-20240101",
+    "32003L0087": cached("02003L0087-20240301"),
+    "32015D1814": cached("02015D1814-20240101"),
 }
 
-pytestmark = pytest.mark.skipif(
-    not PDF.is_file() or not all((p / "works.parquet").is_file() for p in CACHE.values()),
-    reason="run `a2t retrieve amendment_proposal_ets.pdf --cache out/cache` first",
-)
+# Skipping lives on the fixtures that read the sample, not on the module: the tests
+# below that build their own input need no sample and must run on a fresh clone.
+MISSING = "run `a2t retrieve amendment_proposal_ets.pdf --cache out/cache` first"
 
 
 @pytest.fixture(scope="module")
 def reports():
+    if not PDF.is_file() or not all(
+            (p / "works.parquet").is_file() for p in CACHE.values()):
+        pytest.skip(MISSING)
     import polars as pl
 
     lines = extract_lines(PDF)
@@ -367,3 +371,51 @@ def test_review_list_is_small_and_specific(reports):
     doubtful = [r for _, _, report in reports.values() for r in report.doubtful]
     assert 0 < len(doubtful) <= 10
     assert all(r.doubt for r in doubtful)
+
+
+# ------------------------------------------------------- operations nobody read
+
+
+def _block_with_an_unread_instruction():
+    from a2t.model.instruction import Instruction, TargetBlock
+    from a2t.model.tree import Act, Node
+    from a2t.parse.rules import classify_all
+
+    act = Act(celex="TEST", title="t")
+    article = act.root.add(Node(Kind.ARTICLE, key="3"))
+    article.add(Node(Kind.POINT, key="h", text="‘new entrant’ means an installation."))
+
+    container = Instruction(id="1", marker="1", level=1, source_line=1,
+                            raw="Article 3 is amended as follows:")
+    unread = Instruction(id="1.a", marker="a", level=2, source_line=2,
+                         raw="point (h) is renumbered as point (i);")
+    inner = Instruction(id="1.a.i", marker="i", level=3, source_line=3,
+                        raw="point (h) is deleted;")
+    unread.children.append(inner)
+    container.children.append(unread)
+    block = TargetBlock(celex="TEST", citation="Test act", root_scope=None,
+                        instructions=[container])
+    classify_all([block])
+    return block, act, resolve_block(block, act)
+
+
+def test_an_operation_no_rule_read_is_not_counted_as_resolved():
+    """It has no target, so it used to land on the enclosing article and pass for a
+    resolution — and the coverage figure with it — though nothing would be applied."""
+    block, act, report = _block_with_an_unread_instruction()
+    by_id = {r.instruction.id: r for r in report.results}
+
+    assert by_id["1.a"].instruction.op is Op.UNKNOWN
+    assert by_id["1.a"].status == "unresolved"
+    assert by_id["1.a"].unread
+    assert report.coverage < 1.0
+    # Still reported at the provision it sits under, not at the end of the document.
+    assert by_id["1.a"].node is act.article("3")
+
+
+def test_what_an_unread_instruction_contains_is_reported_not_lost():
+    _, _, report = _block_with_an_unread_instruction()
+    by_id = {r.instruction.id: r for r in report.results}
+
+    assert by_id["1.a.i"].status == "unresolved"
+    assert "1.a" in by_id["1.a.i"].reason

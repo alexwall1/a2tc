@@ -22,15 +22,21 @@ from a2t.parse.segment import segment
 from a2t.resolve.resolver import resolve_block
 from a2t.retrieval.base import title_matches
 
+from _samples import cached
+
 ROOT = FsPath(__file__).resolve().parents[1]
 PDF = ROOT / "amending proposal intermodal.pdf"
-CACHE = ROOT / "out" / "cache" / "01992L0106-20130701"
+CACHE = cached("01992L0106-20130701")
 
-pytestmark = pytest.mark.skipif(not PDF.is_file(), reason="held-out PDF not present")
+# Skipping lives on the fixtures that read the sample, not on the module: the tests
+# below that build their own input need no sample and must run on a fresh clone.
+MISSING = "held-out PDF not present"
 
 
 @pytest.fixture(scope="module")
 def lines():
+    if not PDF.is_file():
+        pytest.skip(MISSING)
     return extract_lines(PDF)
 
 

@@ -20,7 +20,9 @@ from a2t.resolve.llm import (
     build_candidates,
 )
 
-CACHE = FsPath(__file__).resolve().parents[1] / "out" / "cache" / "02003L0087-20240301"
+from _samples import cached
+
+CACHE = cached("02003L0087-20240301")
 
 
 class FakeClient:
@@ -345,3 +347,22 @@ def test_cache_key_separates_different_models(tmp_path, monkeypatch):
     OpenRouterClient(Settings(api_key="k", model="two"),
                      cache_dir=tmp_path).complete(messages, RESPONSE_SCHEMA)
     assert posted["n"] == 2
+
+
+def test_an_instruction_nobody_read_is_not_offered_to_the_llm():
+    """Choosing a provision for it would mark it resolved with nothing to apply."""
+    from a2t.resolve.fallback import apply_llm_fallback
+    from a2t.resolve.resolver import Resolution, ResolutionReport
+
+    act = make_act()
+    instr = instruction()
+    report = ResolutionReport([
+        Resolution(instr, node=act.article("3"), status="unresolved",
+                   reason="no rule matched this instruction", unread=True)
+    ])
+    client = FakeClient()
+    outcome = apply_llm_fallback(report, act, LlmResolver(client))
+
+    assert outcome.attempted == 0
+    assert client.calls == []
+    assert report.results[0].status == "unresolved"

@@ -15,16 +15,19 @@ from a2t.model.reconcile import reconcile
 from a2t.model.subdivide import split_sentences
 from a2t.model.tree import Act, Kind, Node, article_order
 
-CACHE = Path(__file__).resolve().parents[1] / "out" / "cache" / "02003L0087-20240301"
+from _samples import cached
 
-pytestmark = pytest.mark.skipif(
-    not (CACHE / "works.parquet").is_file(),
-    reason="run `a2t retrieve amendment_proposal_ets.pdf --cache out/cache` first",
-)
+CACHE = cached("02003L0087-20240301")
+
+# Skipping lives on the fixtures that read the sample, not on the module: the tests
+# below that build their own input need no sample and must run on a fresh clone.
+MISSING = "run `a2t retrieve amendment_proposal_ets.pdf --cache out/cache` first"
 
 
 @pytest.fixture(scope="module")
 def retrieved():
+    if not (CACHE / "works.parquet").is_file():
+        pytest.skip(MISSING)
     import polars as pl
 
     works = pl.read_parquet(CACHE / "works.parquet").row(0, named=True)
