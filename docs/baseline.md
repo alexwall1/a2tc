@@ -204,3 +204,30 @@ sections.
 
 Still the largest gaps: 151 unresolved targets, 32 unclassified instructions (28 "no
 rule matched"), 15 documents that amend annexes only, 9 in which no amended act is found.
+
+## After annexes by reference became external, and two more replacement wordings
+
+Rerun at `f3f0f2c`, all 87 documents.
+
+| | Previous run | This run |
+|---|---|---|
+| Resolved | 1332 of 1514 (88.0%) | 1334 of 1490 (89.5%) |
+| Agreement with the published consolidation | 370 of 435 (85.1%) | 372 of 437 (85.1%) |
+
+As predicted: 24 annex-by-reference instructions left the applicable count and two more
+instructions resolved ("replaced as follows", "replaced by the words ‘…’"). Of the 1.5
+points, 1.4 are the denominator. The instructions no rule matches fell from 28 to 4, and
+each of those now says why (`inserted before`, no title kind).
+
+### The two proposals the tool is for, before and after this session
+
+The corpus holds adopted acts, so the two proposals in `out/samples` were converted with
+the code as it stood before this session's first change (`66888c0`) and with `f3f0f2c`,
+against the same retrieved base acts.
+
+- COM(2026) 616 (ETS): `report.md` and both Word documents are identical.
+- COM(2023) 702 (intermodal): one difference, and it is a correction. Points (l) and
+  (m) inserted into Article 9(1) of Regulation (EU) 2020/1056 were placed at the very end
+  of the document, after the final article, because "In Article 9(1)" could not be read
+  and the insertion fell back to the act root. They now follow point (k) of Article 9(1).
+  The other act's document is identical.
