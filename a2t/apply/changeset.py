@@ -659,6 +659,24 @@ def _flag_shadowed(changeset: ChangeSet) -> None:
         return
     covering = {id(c.node): c for c in whole}
 
+    # The same provision replaced or repealed by two instructions — a proposal that
+    # amends an act in stages does it — leaves one of them with nothing to be shown
+    # against: the base text is replaced once, by the first. Directive 2025/516 replaces
+    # the first subparagraph of Article 222 of Directive 2006/112/EC in its Article 3 and
+    # again in its Article 5; the second was dropped without a word.
+    first_for: dict[int, Change] = {}
+    for change in whole:
+        shown = first_for.setdefault(id(change.node), change)
+        if shown is change:
+            continue
+        change.note = (
+            f"{shown.instruction.id} already replaces {change.node.citation}; the base "
+            f"text can be replaced only once, so this one is not shown — read it in the "
+            f"report")
+        change.instruction.confidence = min(change.instruction.confidence, 0.4)
+        shown.instruction.note(
+            f"{change.instruction.id} replaces the same provision again and is not shown")
+
     for change in changeset.renderable:
         node = change.node or change.anchor
         if node is None:

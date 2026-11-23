@@ -167,6 +167,13 @@ class DocumentEmitter:
         self.result.unrendered = [
             c for c in self.changeset.renderable if id(c) not in self._seen
         ]
+        for change in self.result.unrendered:
+            # A change that reaches no provision must still say so in the report: an
+            # unplaced change with nothing written about it is the one outcome the tool
+            # promises not to have.
+            if not change.note:
+                change.note = ("not rendered — no provision in the document accepted "
+                               "this change")
         return self.result
 
     # ------------------------------------------------------------------ chrome

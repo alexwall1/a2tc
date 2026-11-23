@@ -1125,3 +1125,38 @@ def test_output_names_are_never_reused_within_a_run(tmp_path):
         "02003L0087-20240301_tracked_2.docx",
         "02003L0087-20240301_tracked_3.docx",
     ]
+
+
+def test_a_change_no_provision_accepts_is_reported_with_a_reason(tmp_path):
+    """The promise: nothing unplaced without a word about it in the report."""
+    act = make_act()
+    stray = Node(Kind.PARAGRAPH, key="9", text="A provision that is not in the act.")
+    changeset = ChangeSet(act=act, changes=[
+        change(ChangeKind.REPLACE, stray, stray.text, "Replaced.")])
+    result = emit_document(act, changeset, tmp_path / "a.docx")
+
+    assert len(result.unrendered) == 1
+    assert "not rendered" in result.unrendered[0].note
+    assert result.unrendered[0].needs_review
+
+
+def test_a_provision_replaced_twice_flags_the_one_that_cannot_be_shown(tmp_path):
+    """Directive 2025/516 replaces Article 222 of 2006/112/EC in Articles 3 and 5."""
+    from a2t.apply.changeset import _flag_shadowed
+
+    act = make_act()
+    paragraph = act.article("1").by_key(Kind.PARAGRAPH, "1")
+    early = change(ChangeKind.REPLACE, paragraph, paragraph.text, "From 2026.",
+                   instr=instruction(id="3.8"))
+    late = change(ChangeKind.REPLACE, paragraph, paragraph.text, "From 2027.",
+                  instr=instruction(id="5.6"))
+    changeset = ChangeSet(act=act, changes=[early, late])
+    _flag_shadowed(changeset)
+
+    assert early.note is None
+    assert "3.8 already replaces" in late.note
+    assert late.needs_review
+    assert any("5.6" in n and "not shown" in n for n in early.instruction.notes)
+
+    result = emit_document(act, changeset, tmp_path / "a.docx")
+    assert result.unrendered == [late]
