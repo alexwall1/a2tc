@@ -57,8 +57,13 @@ class Step:
     kind: Kind
     key: str | None = None
     index: int | None = None  # 1-based; negative counts from the end
+    # "paragraphs 12 to 18": this step names a run, from `key` to `through`. Only an
+    # enumeration holds one, and the resolver expands it against the act's own siblings.
+    through: str | None = None
 
     def __str__(self) -> str:
+        if self.key is not None and self.through is not None:
+            return f"{self.kind.value}s {self.key} to {self.through}"
         if self.key is not None:
             return f"{self.kind.value} {self.key}"
         word = next(
@@ -86,8 +91,15 @@ class Path:
         return self.steps[-1].kind if self.steps else None
 
 
-def resolve(path: Path, root: Act | Node) -> Node | None:
-    """Walk `path` from `root`, returning the addressed node or None."""
+def resolve(path: Path, root: Act | Node, notes: list[str] | None = None) -> Node | None:
+    """Walk `path` from `root`, returning the addressed node or None.
+
+    With `notes`, a keyed step that finds nothing under an unnumbered subparagraph is
+    looked for beside it, and the jump is recorded there. The tree keeps points on the
+    paragraph or article, not on the block that introduces them, while an instruction
+    says "in the first subparagraph, point (a)". The jump is only taken when asked for,
+    so a caller can try the exact reading first and say that it did not hold.
+    """
     node = root.root if isinstance(root, Act) else root
 
     for step in path.steps:
@@ -98,6 +110,13 @@ def resolve(path: Path, root: Act | Node) -> Node | None:
             continue
         if step.key is not None:
             found = node.by_key(step.kind, step.key)
+            if (found is None and notes is not None and node.kind is Kind.SUBPARAGRAPH
+                    and not node.of_kind(step.kind) and node.parent is not None):
+                found = node.parent.by_key(step.kind, step.key)
+                if found is not None:
+                    notes.append(
+                        f"{step} counted across the whole of {node.parent.citation}, "
+                        f"not only {node.citation}")
             # An article may be addressed from the act root even when the walk
             # started deeper, e.g. a scoped target.
             if found is None and step.kind is Kind.ARTICLE and isinstance(root, Act):

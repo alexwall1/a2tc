@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from a2t.model.instruction import Instruction, Op, TargetBlock
 from a2t.model.path import Path, Step, parse_ordinal, resolve
 from a2t.model.payload import structure
-from a2t.model.tree import Act, Kind, Node, article_order
+from a2t.model.tree import Act, Kind, Node, _normalise_key, article_order
 from a2t.textdiff import similarity
 
 KIND_NOUNS = {
@@ -42,7 +42,9 @@ KIND_NOUNS = {
 
 # "Article 10a", "paragraph 1a", "point (ag)"
 KEYED = re.compile(
-    r"^(?:the\s+)?(?P<noun>[a-z]+)\s+\(?(?P<key>\d+(?:-?[a-z]+)?|[a-z]{1,3})\)?$", re.I
+    # A roman numeral may run past three letters: "point (xiii)", "point (xxiv)".
+    r"^(?:the\s+)?(?P<noun>[a-z]+)\s+\(?(?P<key>\d+(?:-?[a-z]+)?|[ivxlc]{4,8}|[a-z]{1,3})\)?$",
+    re.I,
 )
 # "the second subparagraph", "the penultimate sentence", "second sentence"
 ORDINAL = re.compile(
@@ -175,26 +177,45 @@ def parse_enumeration(text: str | None) -> tuple[Kind, list[Step]] | None:
     return keyed if keyed is not None else _ordinal_enumeration(text)
 
 
+_KEY = r"\(?(?:\d+(?:-?[a-z]+)?|[ivxlc]{4,8}|[a-z]{1,3})\)?"
+KEY_OR_RANGE = re.compile(
+    rf"^(?:and\s+)?(?P<a>{_KEY})(?:\s+to\s+(?P<b>{_KEY}))?$", re.I)
+PLURAL_NOUN = re.compile(r"^(?:the\s+)?(?P<noun>[a-z]+s)\s+(?P<rest>\S.*)$", re.I)
+
+
+def _key_of(text: str) -> str:
+    return text.strip("() ").lower()
+
+
 def _keyed_enumeration(text: str) -> tuple[Kind, list[Step]] | None:
-    """"paragraphs 3-e, 3-d, 3-c, and 3-b" — each named by its number."""
+    """"paragraphs 3-e, 3-d, 3-c, and 3-b" and "paragraphs 12 to 18" — each named by
+    its number, or a run of them named by its two ends."""
     fragments = [f.strip() for f in re.split(r",|\band\b", text) if f.strip()]
-    if len(fragments) < 2:
+    if not fragments:
         return None
 
-    head = PLURAL_HEAD.match(fragments[0])
+    head = PLURAL_NOUN.match(fragments[0])
     if head is None:
         return None
     kind = KIND_NOUNS.get(head.group("noun").lower())
     if kind is None:
         return None
 
-    keys = [head.group("key").lower()]
-    for fragment in fragments[1:]:
-        match = BARE_KEY.match(fragment)
+    steps: list[Step] = []
+    for position, fragment in enumerate(
+            [head.group("rest")] + fragments[1:]):
+        match = KEY_OR_RANGE.match(fragment)
         if match is None:
             return None
-        keys.append(match.group("key").lower())
-    return kind, [Step(kind, key=key) for key in keys]
+        if match.group("b"):
+            steps.append(Step(kind, key=_key_of(match.group("a")),
+                              through=_key_of(match.group("b"))))
+        else:
+            steps.append(Step(kind, key=_key_of(match.group("a"))))
+    # One provision alone is not an enumeration; one run is.
+    if len(steps) < 2 and steps[0].through is None:
+        return None
+    return kind, steps
 
 
 def _ordinal_enumeration(text: str) -> tuple[Kind, list[Step]] | None:
@@ -250,6 +271,9 @@ def parse_phrase(text: str | None) -> list[Step]:
 # the way the Official Journal cites it. Without this the whole scope is unreadable.
 COMPACT = re.compile(r"^(?:the\s+)?Article\s+(?P<article>\d+[a-z]*)(?P<inner>(?:\([0-9a-z-]+\))+)$",
                      re.I)
+# "point (a)(2)", "point (b)(iii)": a point and the sub-point inside it, cited together.
+POINT_WITH_SUB = re.compile(
+    r"^(?:the\s+)?points?\s+\((?P<key>[0-9a-z-]+)\)(?P<inner>(?:\([0-9a-z-]+\))+)$", re.I)
 ROMAN_KEY = re.compile(r"^(?:i{1,3}|iv|vi{0,3}|ix|x)$", re.I)
 OF = re.compile(r"\s+of\s+", re.I)
 ANNEX = re.compile(r"\bAnnex(?:es)?\b", re.I)
@@ -284,6 +308,12 @@ def _parse_located(fragment: str) -> list[Step] | None:
     compact = COMPACT.match(fragment)
     if compact:
         return _compact_steps(compact)
+
+    with_sub = POINT_WITH_SUB.match(fragment)
+    if with_sub:
+        keys = [with_sub.group("key").lower()] + re.findall(
+            r"\(([0-9a-z-]+)\)", with_sub.group("inner").lower())
+        return [Step(Kind.POINT, key=keys[0])] + [Step(Kind.SUBPOINT, key=k) for k in keys[1:]]
 
     single = _parse_fragment(fragment)
     if single is not None:
@@ -585,10 +615,40 @@ class Resolver:
         result.instruction.confidence = min(result.instruction.confidence, 0.5)
         result.instruction.note(result.doubt)
 
+    def _run_members(self, context: Path, step: Step) -> list[Step] | None:
+        """The provisions "paragraphs 12 to 18" names: every sibling from one to the other.
+
+        Taken from the act itself, in its own order, so a number that was never used or
+        was repealed is not invented and an inserted one ("7a") is not left out. None
+        where either end does not exist or they come the wrong way round.
+        """
+        if step.kind is Kind.ARTICLE:
+            siblings = self.act.articles
+        else:
+            parent = resolve(context, self.act) if context.steps else self.act.root
+            siblings = parent.of_kind(step.kind) if parent is not None else []
+        keys = [_normalise_key(n.key) for n in siblings]
+        first, last = _normalise_key(step.key), _normalise_key(step.through)
+        if first not in keys or last not in keys or keys.index(first) > keys.index(last):
+            return None
+        return [Step(step.kind, key=n.key)
+                for n in siblings[keys.index(first):keys.index(last) + 1]]
+
     def _resolve_enumeration(self, instruction: Instruction, context: Path,
                              kind: Kind, steps: list[Step]) -> Resolution:
         """Apply one instruction to each of the provisions it names."""
         found, missing = [], []
+        expanded: list[Step] = []
+        for step in steps:
+            if step.through is None:
+                expanded.append(step)
+                continue
+            members = self._run_members(context, step)
+            if members is None:
+                missing.append(str(step))
+            else:
+                expanded.extend(members)
+        steps = expanded
         for step in steps:
             path = Path(context.steps + (step,))
             node = resolve(path, self.act)
@@ -754,6 +814,11 @@ class Resolver:
                 reason="no addressable target could be derived",
             )
         node = resolve(path, self.act)
+        if node is None:
+            beside: list[str] = []
+            node = resolve(path, self.act, beside)
+            for note in beside:
+                instruction.note(note)
         if node is None:
             node = _ordinal_within_subtree(path, self.act)
             if node is not None:

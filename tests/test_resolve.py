@@ -607,3 +607,122 @@ def test_an_unsupported_operation_is_refused_with_its_own_reason(raw, said):
     assert instruction.op is Op.UNKNOWN
     assert result.status == "unresolved"
     assert said in result.reason
+
+
+@pytest.mark.parametrize("phrase, steps", [
+    ("point (a)(2)", [Step(Kind.POINT, key="a"), Step(Kind.SUBPOINT, key="2")]),
+    ("point (b)(iii)", [Step(Kind.POINT, key="b"), Step(Kind.SUBPOINT, key="iii")]),
+    ("point (xiii)", [Step(Kind.POINT, key="xiii")]),
+    ("point (xxiv)", [Step(Kind.POINT, key="xxiv")]),
+    ("point (ii)", [Step(Kind.POINT, key="ii")]),
+])
+def test_a_point_cited_with_its_sub_point_and_long_roman_keys(phrase, steps):
+    assert parse_phrase(phrase) == steps
+
+
+def _act_with_points_beside_a_subparagraph():
+    from a2t.model.tree import Act, Node
+
+    act = Act(celex="TEST", title="t")
+    article = act.root.add(Node(Kind.ARTICLE, key="2"))
+    article.add(Node(Kind.SUBPARAGRAPH, text="For the purposes of this Directive:"))
+    article.add(Node(Kind.POINT, key="1", text="‘energy’ means all forms of energy;"))
+    article.add(Node(Kind.POINT, key="4", text="‘biomass’ means organic matter;"))
+    other = act.root.add(Node(Kind.ARTICLE, key="3"))
+    other.add(Node(Kind.POINT, key="1", text="a point of another article"))
+    return act
+
+
+def test_a_point_named_under_a_subparagraph_is_found_beside_it_and_flagged():
+    """Article 2 of Directive 2018/2001: "point (4)" of "the second paragraph"."""
+    instruction, result = _resolve_one(
+        "in Article 2, the first subparagraph, point (4) is replaced by the following:",
+        _act_with_points_beside_a_subparagraph())
+    assert result.status == "resolved"
+    assert result.node.text.startswith("‘biomass’")
+    assert any("counted across the whole of" in n for n in instruction.notes)
+
+
+def test_the_exact_reading_is_preferred_to_the_jump():
+    act = _act_with_points_beside_a_subparagraph()
+    from a2t.model.tree import Node
+
+    sub = act.article("2").of_kind(Kind.SUBPARAGRAPH)[0]
+    sub.add(Node(Kind.POINT, key="4", text="‘biomass’ as the subparagraph holds it"))
+    instruction, result = _resolve_one(
+        "in Article 2, the first subparagraph, point (4) is replaced by the following:", act)
+    assert result.node.text.endswith("holds it")
+    assert not any("counted across" in n for n in instruction.notes)
+
+
+def test_a_point_that_exists_nowhere_in_the_provision_is_still_unresolved():
+    instruction, result = _resolve_one(
+        "in Article 2, the first subparagraph, point (9) is replaced by the following:",
+        _act_with_points_beside_a_subparagraph())
+    assert result.status == "unresolved"
+
+
+def test_the_jump_stays_inside_the_provision_named():
+    """Article 3 has a point (1) too; Article 2's subparagraph must not reach it."""
+    instruction, result = _resolve_one(
+        "in Article 2, the first subparagraph, point (1) is replaced by the following:",
+        _act_with_points_beside_a_subparagraph())
+    assert result.node.text.startswith("‘energy’")
+
+
+# ------------------------------------------------------------------- runs of provisions
+
+
+def _act_with_numbered_paragraphs():
+    from a2t.model.tree import Act, Node
+
+    act = Act(celex="TEST", title="t")
+    article = act.root.add(Node(Kind.ARTICLE, key="10a"))
+    for key in ["1", "2", "3", "11", "12", "13", "14", "16", "18", "19"]:
+        article.add(Node(Kind.PARAGRAPH, key=key, text=f"paragraph {key}"))
+    for key in ["b", "c", "d", "e", "f", "g", "i", "n"]:
+        article.add(Node(Kind.POINT, key=key, text=f"point {key}"))
+    for key in ["7", "7a", "7b", "7c", "8"]:
+        act.root.add(Node(Kind.ARTICLE, key=key))
+    return act
+
+
+def test_a_range_names_every_paragraph_the_act_has_between_its_ends():
+    """"paragraphs 12 to 18 are deleted" — 15 and 17 were never part of the act."""
+    instruction, result = _resolve_one("in Article 10a, paragraphs 12 to 18 are deleted;",
+                                       _act_with_numbered_paragraphs())
+    assert result.status == "resolved"
+    assert [n.key for n in result.nodes] == ["12", "13", "14", "16", "18"]
+
+
+def test_a_range_of_articles_follows_the_acts_own_order_letters_included():
+    instruction, result = _resolve_one("Articles 7 to 7c are deleted;",
+                                       _act_with_numbered_paragraphs())
+    assert [n.key for n in result.nodes] == ["7", "7a", "7b", "7c"]
+
+
+def test_a_range_and_single_members_can_be_listed_together():
+    instruction, result = _resolve_one(
+        "in Article 10a, points (b) to (g) and (i) and (n) are deleted;",
+        _act_with_numbered_paragraphs())
+    assert [n.key for n in result.nodes] == ["b", "c", "d", "e", "f", "g", "i", "n"]
+
+
+def test_a_range_with_an_end_the_act_does_not_have_is_unresolved():
+    instruction, result = _resolve_one("in Article 10a, paragraphs 12 to 20 are deleted;",
+                                       _act_with_numbered_paragraphs())
+    assert result.status == "unresolved"
+    assert "not found" in result.reason
+
+
+def test_a_range_written_backwards_is_unresolved():
+    instruction, result = _resolve_one("in Article 10a, paragraphs 18 to 12 are deleted;",
+                                       _act_with_numbered_paragraphs())
+    assert result.status == "unresolved"
+
+
+def test_a_single_provision_is_still_not_an_enumeration():
+    from a2t.resolve.resolver import parse_enumeration
+
+    assert parse_enumeration("paragraph 3") is None
+    assert parse_enumeration("paragraphs 12 to 18") is not None
