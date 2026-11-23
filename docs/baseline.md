@@ -335,3 +335,49 @@ unplaced changes were not an emitter problem:
 Any change no provision accepts now carries a note ("not rendered — no provision in the
 document accepted this change") and therefore appears in the report under review, and a
 test asserts it. The three that remain unplaced are the legitimate ones above.
+
+## Real proposals as test data
+
+`docs/proposals.tsv` lists 30 Commission proposals amending other acts (COM documents, 5
+each from 2018, 2020, 2021, 2022 and 2023, two or three from the other years), chosen
+at random within each year from the Publications Office's listing of "Proposal for a …
+amending …" titles. They are fetched with
+
+    a2t corpus fetch $(cut -f1 docs/proposals.tsv) --dir out/proposals
+    a2t corpus run out/proposals/*.pdf
+
+and `tests/test_proposals.py` checks detection and segmentation of each (skipped when the
+files are absent). They have no ground truth: a proposal is not what was adopted, so the
+run measures coverage, not agreement.
+
+| | First run | After the fixes below |
+|---|---|---|
+| Acts converted | 38 of 39 | 43 of 43 |
+| Instructions | 865 | 911 |
+| Resolved | 655 of 704 (93.0%) | 729 of 784 (93.0%) |
+
+What reading real proposals found, none of it visible in the 87 adopted acts or the two
+samples:
+
+- **An act named only in its article's heading** ("Amendments to Regulation (EU)
+  2018/1862", then "(1) In Article 2, paragraph 2 is replaced by the following:") was not
+  read at all — 2 of 30 proposals. The heading is now the anchor when nothing in the
+  article names the act.
+- **"Regulation (EC) 1257/96"**, number first with no "No" and a two-digit year, parsed
+  to nothing, and its title could not confirm the act even once it did.
+- **Base acts retrieved in the wrong language.** When Cellar has no English text the
+  retrieval library silently supplies another language and records it only in a column.
+  Ten acts in the cache were Dutch, German, Italian, French or Spanish; "Artikel 1"
+  matches no article pattern, so instructions were looked for in the wrong act or none
+  was assembled. Such an act is now treated as having no English consolidation and falls
+  back as one does. This also moved the adopted-act corpus.
+
+Adopted-act corpus after the language fix: 1470 of 1546 resolved (95.1%) with 130 of 142
+acts converted (from 121), agreement unchanged at 427 of 500.
+
+EUR-Lex's PDF address returns an empty HTML page for some documents that exist, which is
+why 12 corpus documents never downloaded; `corpus fetch` now falls back to the Publications
+Office's own resolver, which serves them.
+
+Still unread among the 30: three annex-only proposals (reported as such) and one decision
+that adjusts amounts without an amending sentence.
