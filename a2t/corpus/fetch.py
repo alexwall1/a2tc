@@ -6,6 +6,7 @@ infrastructure, and a corpus run should not look like a crawl.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -16,6 +17,9 @@ USER_AGENT = "a2t/0.1 (legislative amendment conversion research)"
 
 DEFAULT_DELAY = 2.0  # seconds between requests
 MIN_PDF_BYTES = 10_000
+
+
+CELLAR_CELEX = "https://publications.europa.eu/resource/celex/{celex}"
 
 
 class FetchError(RuntimeError):
@@ -52,17 +56,20 @@ class Fetcher:
             time.sleep(self.delay - elapsed)
 
         try:
-            response = requests.get(
-                pdf_url(celex), headers={"User-Agent": USER_AGENT},
-                timeout=self.timeout,
-            )
-            self._last_request = time.monotonic()
-            response.raise_for_status()
+            response = self._get(pdf_url(celex), {})
+            if not self._is_pdf(response):
+                # EUR-Lex's PDF address answers some documents with an empty HTML page
+                # ("may not exist in EN") though they exist. The Publications Office's
+                # own resolver serves them: it answers a bare CELEX with a list of the
+                # manifestations, the first of which is the document itself.
+                response = self._from_cellar(celex)
+        except FetchError:
+            raise
         except Exception as exc:
             raise FetchError(f"{celex}: {exc}") from exc
 
         content_type = response.headers.get("content-type", "")
-        if "pdf" not in content_type.lower():
+        if not self._is_pdf(response):
             raise FetchError(
                 f"{celex}: expected a PDF, got {content_type!r} "
                 f"({len(response.content)} bytes) — the act may not exist in EN"
@@ -73,3 +80,26 @@ class Fetcher:
 
         path.write_bytes(response.content)
         return path
+
+    def _get(self, url: str, headers: dict):
+        response = requests.get(
+            url, headers={"User-Agent": USER_AGENT, **headers}, timeout=self.timeout)
+        self._last_request = time.monotonic()
+        if response.status_code != 300:  # 300 is Cellar listing the manifestations
+            response.raise_for_status()
+        return response
+
+    @staticmethod
+    def _is_pdf(response) -> bool:
+        return "pdf" in response.headers.get("content-type", "").lower()
+
+    def _from_cellar(self, celex: str):
+        headers = {"Accept": "application/pdf", "Accept-Language": "eng"}
+        response = self._get(CELLAR_CELEX.format(celex=celex.strip().upper()), headers)
+        if response.status_code == 300:
+            links = re.findall(r'href="([^"]+/DOC_1)"', response.text)
+            if not links:
+                raise FetchError(f"{celex}: Cellar lists no document for it")
+            time.sleep(self.delay)
+            response = self._get(links[0].replace("http://", "https://"), headers)
+        return response

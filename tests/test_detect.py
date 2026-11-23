@@ -409,3 +409,57 @@ def test_the_report_lists_the_proposals_own_provisions():
     assert "## The proposal's own provisions" in text
     assert "- Article 2 — Transposition" in text
     assert "amend no act" in text
+
+
+# ------------------------------------ an act named only in the heading of its article
+
+
+def test_an_article_headed_amendments_to_an_act_is_that_acts_amendment():
+    """COM(2020) 791: "(1) In Article 2, paragraph 2 is replaced by the following:"."""
+    (block,) = _blocks(
+        "Article 1", "Amendments to Regulation (EU) 2018/1862",
+        "(1) In Article 2, paragraph 2 is replaced by the following:",
+        "‘2. The text of paragraph 2.’;",
+        "(2) Article 24 is deleted.",
+        "Article 2", "This Regulation shall enter into force.")
+    assert block.celex == "32018R1862"
+    assert [i.id for i in block.walk()] == ["1.1", "1.2"]
+    assert block.instructions[0].payload.startswith("2. The text")
+
+
+def test_the_article_cited_in_the_heading_becomes_the_scope():
+    """COM(2018) 719: "Amendments to Article 18 of Regulation (EU) No 516/2014"."""
+    (block,) = _blocks(
+        "Article 1", "Amendments to Article 18 of Regulation (EU) No 516/2014",
+        "Article 18 is amended as follows:",
+        "(1) paragraph 3 is replaced by the following:", "‘3. New paragraph.’;",
+        "Article 2", "This Regulation shall enter into force.")
+    assert block.celex == "32014R0516"
+    assert block.root_scope == "18"
+    assert any(i.op.value == "replace" for i in block.walk())
+
+
+def test_a_heading_does_not_duplicate_an_article_that_names_the_act_itself():
+    found = detect_targets(_operative(
+        "Article 1", "Amendments to Directive 2003/87/EC",
+        "Directive 2003/87/EC is amended as follows:", "(1) Article 5 is deleted.",
+        "Article 2", "Entry into force"))
+    assert [t.celex for t in found.targets] == ["32003L0087"]
+
+
+def test_the_words_amendments_to_inside_running_text_are_not_a_heading():
+    """Entry-into-force text: "amendments to Article 10d of Directive 2003/87/EC, …"."""
+    found = detect_targets(_operative(
+        "Article 1", "Directive 2003/87/EC is amended as follows:", "(1) Article 5 is deleted.",
+        "Article 5", "Entry into force and application",
+        "Amendments to Article 10d of Directive 2003/87/EC, Article 1(20) regarding the",
+        "amendments to Article 10f, shall apply from 1 January 2031."))
+    assert [t.celex for t in found.targets] == ["32003L0087"]
+
+
+def test_a_two_digit_year_with_no_number_marker():
+    from a2t.detect.celex import parse_citation
+
+    assert parse_citation("Regulation (EC) 1257/96").celex == "31996R1257"
+    assert parse_citation("Regulation (EC) No 219/2009").celex == "32009R0219"
+    assert parse_citation("Directive 2003/87/EC").celex == "32003L0087"

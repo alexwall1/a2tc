@@ -95,6 +95,9 @@ def parse_citation(text: str) -> Citation | None:
     elif len(a_raw) == 2:
         # "Directive 96/61/EC" — two-digit year, always 20th century.
         year, number = 1900 + a, b
+    elif len(match.group("b")) == 2 and not _plausible_year(a):
+        # "Regulation (EC) 1257/96" — number first with no "No", year in two digits.
+        number, year = a, 1900 + b
     elif _plausible_year(b):
         # Fall back to whichever group can be a year.
         number, year = a, b

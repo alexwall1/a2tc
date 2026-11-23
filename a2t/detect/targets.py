@@ -272,7 +272,47 @@ def find_anchors(operative: list[Line]) -> list[Anchor]:
         cut = _without_act(text, citation) if citation is not None else None
         if citation is not None and cut is not None:
             found.append(Anchor(index, citation, None, inline=True, text=cut))
-    return found
+    return sorted(found + _heading_anchors(operative, found), key=lambda a: a.index)
+
+
+def _directly_under_article(operative: list[Line], index: int) -> bool:
+    """Is the nearest non-blank line above `index` an "Article N" heading?"""
+    for line in reversed(operative[max(0, index - 4):index]):
+        if not line.blank:
+            return ARTICLE_HEADING.match(line.stripped) is not None
+    return False
+
+
+def _heading_anchors(operative: list[Line], found: list[Anchor]) -> list[Anchor]:
+    """An article headed "Amendments to Regulation (EU) 2018/1862" whose text never says so.
+
+    Some proposals name the act only in the article's heading and then amend it in
+    sentences that do not repeat it: "(1) In Article 2, paragraph 2 is replaced by the
+    following:" (COM(2020) 791), or "Article 18 is amended as follows:" under
+    "Amendments to Article 18 of Regulation (EU) No 516/2014" (COM(2018) 719). With
+    no anchor of its own, such an article was not read at all. The heading is the
+    anchor only where nothing between it and the next article already is one, so an
+    article that does name the act keeps the reading it always had.
+    """
+    taken = {a.index for a in found}
+    out: list[Anchor] = []
+    headings = [i for i, line in enumerate(operative) if ARTICLE_HEADING.match(line.stripped)]
+    for index, line in enumerate(operative):
+        match = HEADER.match(line.stripped)
+        # A heading is the line right under "Article N". The same words also begin a
+        # wrapped line of the entry-into-force article ("amendments to Article 10d of
+        # Directive 2003/87/EC, Article 1(20) regarding …"), which is no heading.
+        if match is None or not _directly_under_article(operative, index):
+            continue
+        citation = parse_citation(match.group("act"))
+        if citation is None:
+            continue
+        following = next((h for h in headings if h > index), len(operative))
+        if any(index < a < following for a in taken):
+            continue
+        scope = re.match(r"^Article\s+(?P<scope>[\w.]+)\s+of\s+", match.group("act"))
+        out.append(Anchor(index, citation, scope.group("scope") if scope else None))
+    return out
 
 
 def detect_targets(operative: list[Line], all_lines: list[Line] | None = None) -> Detection:
