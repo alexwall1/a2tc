@@ -180,3 +180,27 @@ provision — the base act's Article 1, second subparagraph — with no flag. Th
 placed correctly where the citation is compact, and refused with a stated reason where
 the scope is still unreadable. The 31 refusals are the next list to read: each is a
 scope wording the parser does not know.
+
+## After refusing containers and scopes the tree cannot hold, and not letting a scope swallow quoted words
+
+Rerun at `6a6a663`, all 87 documents.
+
+| | Previous run | This run |
+|---|---|---|
+| Resolved | 1329 of 1547 (85.9%) | 1332 of 1514 (88.0%) |
+| Agreement with the published consolidation | 364 of 429 (84.8%) | 370 of 435 (85.1%) |
+
+Read the first row with care: 33 fewer instructions count as applicable, because those
+that sit inside an annex are now reported as "amends an annex — out of scope" and leave
+the denominator, as annex-by-reference instructions already did. Only three more
+instructions resolved. Most of the 2.1 points is the denominator, not conversion.
+
+What changed underneath: instructions inside a container that names an annex, or
+anything else the tree cannot hold, are no longer resolved against the act root; each is
+now reported with the reason. The refusals say what is missing —
+"names a provision kind the model does not have (title)" accounts for 10 of them, the
+list of what to build for the 2006/112/EC amendments that insert titles, chapters and
+sections.
+
+Still the largest gaps: 151 unresolved targets, 32 unclassified instructions (28 "no
+rule matched"), 15 documents that amend annexes only, 9 in which no amended act is found.
