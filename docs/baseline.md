@@ -102,3 +102,18 @@ more of them can be compared. Full run on all 87 documents: 1241 of 1512 resolve
 What remains, largest first: 235 unresolved targets in total, 37 unclassified
 instructions, 34 documents in which no amended act is detected, 34 with no addressable
 target and 34 whose target phrase could not be parsed.
+
+## The 34 documents in which no amended act is detected
+
+Read from each document's first amending sentence, after the second run.
+
+| Kind | Documents | Example opening |
+|---|---|---|
+| Amends an annex only (out of scope) | 13 | "Annex VIII to Directive 2012/27/EU is replaced by the text in Annex I to this regulation" |
+| The article is itself the instruction, with no "is amended as follows" container | 16 | "Article 97 of Directive 2006/112/EC is replaced by the following:", "In Article 12 of Directive 2003/87/EC, the following paragraphs are added:", "The following Article is inserted in Directive 2006/112/EC:" |
+| Container with a lead-in the anchor does not accept | 2 | "Accordingly, Regulation (EC) No 1257/96 is hereby amended as follows:" |
+| Other: amends several acts at once, or the operative part is not isolated | 3 | |
+
+So detection is not one narrow fix. Only the second row is a regex, and it is two
+documents. The largest group is an amending article that carries a single instruction
+naming the act inside its target phrase, which the segmenter has no block for.
