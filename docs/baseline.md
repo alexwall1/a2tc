@@ -274,3 +274,34 @@ What these changes were for is not in the percentages:
 
 Most of the title and section instructions come from one act family, the VAT Directive.
 Annex instructions are spread over many acts. Neither appears in the two sample proposals.
+
+## After ranges, sub-point citations, keys beside a subparagraph and introductory words
+
+Rerun at `2e04cb4`, all 87 documents. The denominator is the same as in the previous run
+(1496), so this rise is conversion and not bookkeeping.
+
+| | Previous run | This run |
+|---|---|---|
+| Resolved | 1340 of 1496 (89.6%) | 1426 of 1496 (95.3%) |
+| Compared with the published consolidation | 437 | 500 |
+| Agreeing | 372 (85.1%) | 427 (85.4%) |
+| Flagged for review | 80 | 90 |
+
+86 more instructions resolved. 63 of them can be compared with the published text, and
+55 of those agree (87%) — about the same as the rest, so the new resolutions are not
+mostly wrong placements. The other 23 are deletions and insertions, which are not
+compared. Ten more changes carry a review flag, which is the "counted across the whole of
+…" note on a point found beside its subparagraph.
+
+What was added, by instructions affected in the previous run's list:
+
+- Introductory words ("the introductory phrase is replaced by the following:"), read as
+  the provision's own text before its list, without touching the points below.
+- A key looked for beside an unnumbered subparagraph ("in the first subparagraph, point
+  (a)"): the tree keeps points on the paragraph, not on the block that introduces them.
+- Runs of provisions ("paragraphs 12 to 18", "Articles 7a to 7e", "points (b) to (g) and
+  (i) and (n)"), expanded against the act's own siblings; a missing end is refused.
+- A point cited with its sub-point ("point (b)(iii)"), long roman keys ("point (xxiv)"),
+  a point inside a point ("point (g), point (i)") and chapters numbered with digits.
+
+Both proposals convert to identical reports and Word documents after these changes.
