@@ -418,3 +418,27 @@ def test_unmatched_instruction_is_flagged_not_guessed():
     assert instruction.op is Op.UNKNOWN
     assert instruction.confidence == 0.0
     assert instruction.notes
+
+
+@pytest.mark.parametrize(
+    "raw, scope, find",
+    [
+        # Quoted words that contain commas must not end the scope early. Wordings from
+        # adopted acts amending Regulation 2019/631 and Directive 2014/65.
+        ("in point (a), the reference to ‘Annex II to Directive 2007/46/EC’ is "
+         "replaced by ‘Article 4(1)’;", "point (a)", "Annex II to Directive 2007/46/EC"),
+        ("in Article 93(1), the date ‘3 July 2016’ is replaced by ‘3 July 2017’;",
+         "Article 93(1)", "3 July 2016"),
+        ("in paragraph 2, the reference to ‘Article 7(8), Article 10(8), the fourth "
+         "subparagraph of Article 11(1)’ is replaced by ‘Article 7(8)’;",
+         "paragraph 2", "Article 7(8), Article 10(8), the fourth subparagraph of "
+                        "Article 11(1)"),
+        # A list-valued scope with no quotes still reaches its last comma.
+        ("in paragraphs 3-e, 3-d, 3-c, and 3-b, the date ‘2030’ is replaced by ‘2035’;",
+         "paragraphs 3-e, 3-d, 3-c, and 3-b", "2030"),
+    ],
+)
+def test_a_scope_stops_before_the_words_it_quotes(raw, scope, find):
+    instruction = make(raw)
+    assert instruction.scope_text == scope
+    assert instruction.find_text == find

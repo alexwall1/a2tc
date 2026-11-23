@@ -510,3 +510,67 @@ def test_what_sits_inside_an_unreadable_scope_is_refused_with_it():
     classify_all([block])
     report = resolve_block(block, _act_with_two_articles())
     assert [r.status for r in report.results] == ["unresolved", "unresolved"]
+
+
+# ------------------------------------------ containers and scopes naming what is not there
+
+
+def _container_block(container_raw, *child_raws):
+    from a2t.model.instruction import Instruction, TargetBlock
+    from a2t.parse.rules import classify_all
+
+    container = Instruction(id="1", marker="1", level=1, source_line=1, raw=container_raw)
+    for n, raw in enumerate(child_raws, 1):
+        container.children.append(Instruction(id=f"1.{n}", marker=str(n), level=2,
+                                              source_line=1 + n, raw=raw))
+    block = TargetBlock(celex="TEST", citation="Test", root_scope=None,
+                        instructions=[container])
+    classify_all([block])
+    return block
+
+
+def test_a_container_naming_something_unreadable_refuses_what_is_inside_it():
+    """Its children used to be resolved against the act root."""
+    block = _container_block("The schedule of fees is amended as follows:",
+                             "paragraph 3 is deleted;")
+    report = resolve_block(block, _act_with_two_articles())
+    assert [r.status for r in report.results] == ["unresolved", "unresolved"]
+    assert all(r.node is None for r in report.results)
+    assert "could not be read" in report.results[0].reason
+
+
+def test_a_container_for_an_annex_is_not_applicable_with_everything_in_it():
+    block = _container_block("Annex IV is amended as follows:",
+                             "in row 4, the figure ‘3’ is replaced by ‘5’;",
+                             "row 11 is deleted;")
+    report = resolve_block(block, _act_with_two_articles())
+    assert [r.status for r in report.results] == ["not-applicable"] * 3
+    assert report.results[0].reason == "amends an annex — out of scope"
+    assert report.coverage == 1.0  # nothing applicable was left unresolved
+
+
+def test_a_scope_inside_an_annex_is_not_applicable():
+    instruction, result = _resolve_one(
+        "in point (k) of Annex I, the second paragraph is replaced by the following:",
+        _act_with_two_articles())
+    assert result.status == "not-applicable"
+
+
+@pytest.mark.parametrize("scope, kind", [
+    ("Title VIII, Chapter 2", "title"),
+    ("Chapter VI, Section 3, Subsection II", "section"),
+    ("the introductory part", "introductory part"),
+])
+def test_a_refusal_says_which_kind_of_provision_the_model_lacks(scope, kind):
+    instruction, result = _resolve_one(
+        f"in {scope}, the first subparagraph is replaced by the following:",
+        _act_with_two_articles())
+    assert result.status == "unresolved"
+    assert "provision kind the model does not have" in result.reason
+    assert kind in result.reason
+
+
+def test_a_container_whose_target_is_readable_still_resolves_its_children():
+    block = _container_block("Article 27 is amended as follows:", "paragraph 3 is deleted;")
+    report = resolve_block(block, _act_with_two_articles())
+    assert [r.status for r in report.results] == ["resolved", "resolved"]

@@ -233,6 +233,10 @@ COMPACT = re.compile(r"^(?:the\s+)?Article\s+(?P<article>\d+[a-z]*)(?P<inner>(?:
                      re.I)
 ROMAN_KEY = re.compile(r"^(?:i{1,3}|iv|vi{0,3}|ix|x)$", re.I)
 OF = re.compile(r"\s+of\s+", re.I)
+ANNEX = re.compile(r"\bAnnex(?:es)?\b", re.I)
+# Provision kinds a base act has that the tree does not model.
+UNMODELLED = re.compile(
+    r"\b(?:title|section|subsection|row|introductory\s+(?:wording|part|words))\b", re.I)
 
 
 def _compact_steps(match: re.Match) -> list[Step]:
@@ -372,8 +376,25 @@ class Resolver:
             return Path(tuple(steps))
         return Path(context.steps + tuple(steps))
 
+    def _refuse_unreadable(self, instruction: Instruction, scoped: Path | None,
+                           what: str, phrase: str) -> list[Resolution]:
+        """Refuse an instruction whose scope or container target cannot be read.
+
+        An annex is out of scope and says so, as `Op.EXTERNAL` does; anything else says
+        which kind of provision the model is missing, where that is the reason.
+        """
+        if ANNEX.search(phrase):
+            return self._refuse(instruction, scoped,
+                                "amends an annex — out of scope", status="not-applicable")
+        missing = UNMODELLED.search(phrase)
+        why = (f"{what} {phrase!r} names a provision kind the model does not have "
+               f"({missing.group(0).lower()})" if missing
+               else f"{what} {phrase!r} could not be read, so there is no provision "
+                    f"to look in")
+        return self._refuse(instruction, scoped, why)
+
     def _refuse(self, instruction: Instruction, scoped: Path | None,
-                reason: str) -> list[Resolution]:
+                reason: str, status: str = "unresolved") -> list[Resolution]:
         """Unresolved results for an instruction and everything inside it.
 
         What it contains was addressed relative to something that could not be read;
@@ -382,13 +403,14 @@ class Resolver:
         """
         first = (self._check(instruction, scoped) if scoped is not None
                  else Resolution(instruction))
-        first.status, first.reason, first.unread = "unresolved", reason, True
+        first.status, first.reason = status, reason
+        first.unread = status == "unresolved"
         results = [first]
         for child in instruction.children:
             for inner in child.walk():
                 results.append(Resolution(
-                    inner, path=scoped, node=first.node, status="unresolved",
-                    unread=True,
+                    inner, path=scoped, node=first.node, status=status,
+                    unread=status == "unresolved",
                     reason=f"inside instruction {instruction.id}: {reason}",
                 ))
         return results
@@ -405,10 +427,8 @@ class Resolver:
         scoped = self._context_for(instruction, context)
 
         if scoped is None:
-            report.results.extend(self._refuse(
-                instruction, None,
-                f"scope {instruction.scope_text!r} could not be read, so there is no "
-                f"provision to look in"))
+            report.results.extend(self._refuse_unreadable(
+                instruction, None, "scope", instruction.scope_text))
             return
 
         if instruction.op is Op.UNKNOWN:
@@ -442,6 +462,14 @@ class Resolver:
             return
 
         target_steps = parse_phrase(instruction.target_text)
+
+        if instruction.op is Op.CONTAINER and instruction.target_text and not target_steps:
+            # "Annex IV is amended as follows:" names nothing the articles hold. Carrying
+            # on in the inherited context resolved its children against whatever
+            # that was — the act root, for a top-level container.
+            report.results.extend(self._refuse_unreadable(
+                instruction, scoped, "target", instruction.target_text))
+            return
 
         if instruction.op is Op.CONTAINER:
             child_context = self._extend(scoped, target_steps)

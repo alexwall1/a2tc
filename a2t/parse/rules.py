@@ -25,6 +25,12 @@ _AFTER_SCOPE = (
 # Greedy up to the *last* comma before the operative clause, so list-valued scopes
 # survive: "in paragraphs 3-e, 3-d, 3-c, and 3-b, the date ..." is one scope.
 SCOPE = re.compile(rf"^in\s+(?P<scope>.+),\s*(?={_AFTER_SCOPE})", re.I)
+# A scope is a provision's address and never contains quoted words. Where the
+# instruction quotes the words it changes, the greedy pattern above can end the scope
+# at a comma *inside* them: "in paragraph 2, the reference to ‘Article 7(8), Article
+# 10(8), the fourth subparagraph …’ is replaced" took everything up to "the fourth".
+SCOPE_BEFORE_QUOTE = re.compile(
+    rf"^in\s+(?P<scope>[^‘’]+),\s*(?={_AFTER_SCOPE})", re.I)
 # "in the title of Chapter III the word ..." — same idea without the comma
 SCOPE_NO_COMMA = re.compile(r"^in\s+(?P<scope>the\s+title\s+of\s+[^,]+?)\s+the\s+", re.I)
 
@@ -81,7 +87,7 @@ def _strip_scope(text: str) -> tuple[str | None, str]:
     match = SCOPE_NO_COMMA.match(text)
     if match:
         return match.group("scope").strip(), text[: match.start()] + text[match.end("scope") + 1:].strip()
-    match = SCOPE.match(text)
+    match = SCOPE_BEFORE_QUOTE.match(text) or SCOPE.match(text)
     if match:
         return match.group("scope").strip(), text[match.end():].strip()
     return None, text
