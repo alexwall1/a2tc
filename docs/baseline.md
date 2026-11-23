@@ -117,3 +117,31 @@ Read from each document's first amending sentence, after the second run.
 So detection is not one narrow fix. Only the second row is a regex, and it is two
 documents. The largest group is an amending article that carries a single instruction
 naming the act inside its target phrase, which the segmenter has no block for.
+
+## After detecting annex-only documents, linking-word anchors and single-instruction articles
+
+Rerun at `427c629`, all 87 documents.
+
+| | Previous run | This run |
+|---|---|---|
+| Documents with no amended act found and no explanation | 34 | 9 |
+| Documents reported as amending annexes only (out of scope) | 0 | 15 |
+| Resolved | 1241 of 1512 (82.1%) | 1260 of 1526 (82.6%) |
+| Agreement with the published consolidation | 287 of 407 (70.5%) | 290 of 410 (70.7%) |
+
+The totals barely move because each newly detected document carries one instruction;
+12 documents now produce one each, and the two of them that replace a provision agree
+with the published text. Insertions are not compared, so the other nine are unchecked
+by the corpus (two were read by hand: Article 129a of Directive 2006/112/EC lands after
+Article 129; Article 44(10) of Regulation 2017/745 is replaced in place).
+
+One document looks worse in the log (32019L2177: 46 of 51 resolved to 25 of 30) because
+Cellar answered 503 while listing versions of Directive 2015/849 on that run; it is the
+same code both times. Corpus runs should be repeated, or retried per act, before
+a drop of that size is believed.
+
+Still undetected (9), by reading the first lines of each: an omnibus act amending some
+60 acts, one article per act ("Accordingly, … is hereby amended as follows:", 32009R0219);
+operative parts the isolator does not bound; a sentence whose verb wraps onto the second
+line (32009R1073: "the following para-graph shall be inserted"); and decisions whose
+amendment is worded in the recital.
