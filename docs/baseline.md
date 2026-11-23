@@ -305,3 +305,33 @@ What was added, by instructions affected in the previous run's list:
   a point inside a point ("point (g), point (i)") and chapters numbered with digits.
 
 Both proposals convert to identical reports and Word documents after these changes.
+
+## After treating a chapter title as a title, and reporting what cannot be shown
+
+Rerun at `462988d`, all 87 documents.
+
+| | Previous run | This run |
+|---|---|---|
+| Resolved | 1426 of 1496 (95.3%) | 1426 of 1496 (95.3%) |
+| Agreement with the published consolidation | 427 of 500 (85.4%) | 427 of 500 (85.4%) |
+| Changes unplaced in the document | 11 | 3 |
+| Flagged for review | 90 | 88 |
+
+The figures that count did not move; what moved is what the output says. The eleven
+unplaced changes were not an emitter problem:
+
+- Eight were a regression this work had introduced, and a bug that predated it for roman
+  numerals: "the title of Chapter 8 is replaced by the following:" was read as replacing
+  the *chapter*, articles and all, so every edit inside it was reported as impossible to
+  show. It is now a title edit and the chapter is left alone. The resolved count does not
+  change because the instruction was counted as resolved either way.
+- One was the same provision replaced twice: Directive 2025/516 replaces the first
+  subparagraph of Article 222 of Directive 2006/112/EC in its Article 3 and again in its
+  Article 5. Only one can be shown against the base text; the other is now flagged with
+  the reason instead of being dropped without a word.
+- Two, in the same directive's Article 262, are replaced in full by a later article.
+  That was already reported and still is.
+
+Any change no provision accepts now carries a note ("not rendered — no provision in the
+document accepted this change") and therefore appears in the report under review, and a
+test asserts it. The three that remain unplaced are the legitimate ones above.
