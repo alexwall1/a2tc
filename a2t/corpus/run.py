@@ -82,6 +82,7 @@ class DocumentResult:
     ok: bool = True
     error: str | None = None
     acts: list[ActResult] = field(default_factory=list)
+    annexes_only: bool = False  # nothing amended but annexes, which are out of scope
 
     @property
     def gaps(self) -> list[str]:
@@ -92,7 +93,8 @@ class DocumentResult:
         elif not self.acts:
             # Parsing without finding anything to amend is the worst failure mode:
             # it produces no output and looks like success.
-            out.append("no amendment targets detected")
+            out.append("amends annexes only (out of scope)" if self.annexes_only
+                       else "no amendment targets detected")
         for act in self.acts:
             if act.error:
                 out.append(f"act failed: {_generalise(act.error)}")
@@ -124,6 +126,7 @@ def run_document(pdf: Path, provider, truth: Act | None = None,
         lines = extract_lines(pdf)
         operative = operative_part(lines).lines
         detection = detect_targets(operative, lines)
+        result.annexes_only = bool(detection.annexes)
         blocks = segment(operative, detection.targets)
         if classifier is None:
             classify_all(blocks)

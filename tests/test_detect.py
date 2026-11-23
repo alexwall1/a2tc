@@ -192,3 +192,79 @@ def test_detection_without_all_lines_still_works(lines):
     result = detect_targets(op)
     assert len(result.targets) == 2
     assert [t.celex for t in result.targets] == ["32003L0087", "32015D1814"]
+
+
+# ------------------------------------------------- documents that amend only annexes
+
+
+def _operative(*texts):
+    from a2t.extract.pdf import Line
+
+    return [Line(t, 1, i + 1) for i, t in enumerate(texts)]
+
+
+@pytest.mark.parametrize(
+    "sentence, act",
+    [
+        # Wordings seen in adopted acts amending Directives 2012/27, 2003/87 and
+        # Regulations 2019/631 and 2017/745.
+        ("Annex VIII to Directive 2012/27/EU is replaced by the text in Annex I to "
+         "this Directive.", "Directive 2012/27/EU"),
+        ("In Directive 2003/87/EC, in Annex I, the second paragraph of the entry "
+         "‘Aviation’ is amended as follows:", "Directive 2003/87/EC"),
+        ("Annexes I and III to Regulation (EU) 2019/631 are amended in accordance with "
+         "the Annex to this Regulation.", "Regulation (EU) 2019/631"),
+        ("In Part C of Annex VI to Regulation (EU) 2017/745 the following sections "
+         "are added:", "Regulation (EU) 2017/745"),
+    ],
+)
+def test_a_document_amending_only_an_annex_says_so(sentence, act):
+    found = detect_targets(_operative("Article 1", sentence))
+    assert found.targets == []
+    assert found.annexes == [act]
+    assert "annexes are out of scope" in found.explain_empty()
+    assert act in found.explain_empty()
+
+
+def test_a_recital_wishing_an_annex_amended_is_not_an_amendment():
+    found = detect_targets(_operative(
+        "(8) Annexes I and III to Regulation (EU) 2019/631 should therefore be "
+        "amended accordingly."))
+    assert found.annexes == []
+    assert found.explain_empty() == "no amendment targets found in the operative part"
+
+
+def test_annexes_are_not_searched_for_when_an_act_is_amended():
+    found = detect_targets(_operative(
+        "Article 1", "Directive 2003/87/EC is amended as follows:",
+        "(1) in Article 3, point (h) is replaced by the following:",
+        "Annex I to Directive 2003/87/EC is replaced by the following:"))
+    assert [t.celex for t in found.targets] == ["32003L0087"]
+    assert found.annexes == []
+
+
+def test_a_linking_word_before_the_act_does_not_hide_the_anchor():
+    """Regulation (EC) No 219/2009 introduces its amendments of No 1257/96 this way."""
+    found = detect_targets(_operative(
+        "Article 1", "Accordingly, Regulation (EC) No 1257/96 is hereby amended as "
+        "follows:", "1. in Article 13, the fourth paragraph shall be replaced by the "
+        "following:"))
+    assert [t.celex for t in found.targets] == ["31996R1257"]
+
+
+def test_a_quoted_sentence_with_a_linking_word_is_still_not_an_anchor():
+    found = detect_targets(_operative(
+        "Article 1", "Accordingly, Article 3 is amended as follows:"))
+    assert found.targets == []
+
+
+@pytest.mark.parametrize(
+    "text, celex",
+    [
+        ("Regulation (EEC) No 2913/92", "31992R2913"),
+        ("Regulation (EC) No 1257/96", "31996R1257"),
+        ("Regulation (EC) No 219/2009", "32009R0219"),
+    ],
+)
+def test_a_two_digit_year_after_the_number_is_the_20th_century(text, celex):
+    assert parse_citation(text).celex == celex

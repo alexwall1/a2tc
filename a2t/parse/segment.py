@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from a2t.detect.targets import ANCHOR
+from a2t.detect.targets import match_anchor
 from a2t.detect.celex import parse_citation
 from a2t.extract.pdf import Line
 from a2t.model.instruction import Instruction, Op, TargetBlock
@@ -512,7 +512,7 @@ def segment(operative: list[Line], targets) -> list[TargetBlock]:
     """Split the operative part into one `TargetBlock` per amended act."""
     anchors: list[tuple[int, object]] = []
     for index, line in enumerate(operative):
-        match = ANCHOR.match(line.stripped)
+        match = match_anchor(line.stripped)
         if match and parse_citation(match.group("act")) is not None:
             anchors.append((index, line))
 

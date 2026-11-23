@@ -90,7 +90,7 @@ def detect(pdf: Path) -> None:
         raise click.ClickException(str(exc)) from exc
 
     if not result.targets:
-        raise click.ClickException("no amendment targets found in the operative part")
+        raise click.ClickException(result.explain_empty())
 
     click.echo(f"detected {len(result.targets)} target act(s):\n")
     width = max(len(t.citation.raw) for t in result.targets)
@@ -393,6 +393,9 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
         blocks = segment(operative, detection.targets)
     except (ExtractionError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
+    if not detection.targets:
+        # Writing an empty report and exiting 0 looks like success.
+        raise click.ClickException(detection.explain_empty())
     classify_all(blocks)
 
     on_date = as_of.date() if as_of else find_proposal_date(lines)

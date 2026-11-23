@@ -31,9 +31,28 @@ from a2t.extract.deboilerplate import strip_furniture
 from a2t.extract.pdf import Line
 
 ANCHOR = re.compile(
-    r"^(?:Article\s+(?P<scope>[\w.]+)\s+of\s+)?"
+    # "Accordingly, Regulation (EC) No 1257/96 is hereby amended as follows:" — a
+    # linking word before the act (Regulation (EC) No 219/2009, which amends No 1257/96).
+    r"^(?:(?:Accordingly|Therefore|Consequently|Thus),\s+)?"
+    r"(?:Article\s+(?P<scope>[\w.]+)\s+of\s+)?"
     r"(?P<act>.+?)\s+(?:is|shall\s+be)\s+(?:hereby\s+)?amended\s+as\s+follows\s*:",
 )
+
+def match_anchor(text: str):
+    """The anchor match for a line, or None when it is not one that opens an act.
+
+    Shared with the segmenter so the two cannot disagree about where a block starts.
+
+    A line that names an annex in its subject is not an anchor for the act's articles:
+    "In Directive 2003/87/EC, in Annex I, the entry ‘Aviation’ is amended as follows:"
+    would otherwise read as the whole of the Directive being amended, and its points
+    would be looked for among the articles.
+    """
+    match = ANCHOR.match(text)
+    if match is None or re.search(r"\bAnnex(?:es)?\b", match.group("act")):
+        return None
+    return match
+
 
 HEADER = re.compile(r"^Amendments?\s+to\s+(?P<act>.+?)\s*$", re.I)
 
@@ -117,6 +136,17 @@ class Discrepancy:
 class Detection:
     targets: list[Target] = field(default_factory=list)
     discrepancies: list[Discrepancy] = field(default_factory=list)
+    # Acts whose annexes are what the document amends. Filled only when nothing else was
+    # found: an annex-only amendment is out of scope, and without this it is
+    # indistinguishable from a document the detector failed to read.
+    annexes: list[str] = field(default_factory=list)
+
+    def explain_empty(self) -> str:
+        """Why there is nothing to convert, for the one who ran it."""
+        if self.annexes:
+            return (f"the document amends only annexes of {', '.join(self.annexes)}; "
+                    f"annexes are out of scope")
+        return "no amendment targets found in the operative part"
 
 
 def _blocks(lines: list[Line]) -> list[tuple[int, str]]:
@@ -133,6 +163,25 @@ def _blocks(lines: list[Line]) -> list[tuple[int, str]]:
     if buf:
         out.append((buf[0].lineno, " ".join(b.stripped for b in buf)))
     return out
+
+
+# An amending sentence is one that carries an operation; a recital saying an annex
+# "should be amended" does not.
+_AMENDING_VERB = re.compile(
+    r"\b(?:is|are|shall\s+be)\s+(?:hereby\s+)?"
+    r"(?:amended|replaced|deleted|inserted|added|repealed)\b", re.I)
+_ANNEX = re.compile(r"\bAnnex(?:es)?\b")
+
+
+def annexes_amended(operative: list[Line]) -> list[str]:
+    """The acts whose annexes the operative part amends, in order of first mention."""
+    found: dict[str, str] = {}
+    for _, text in _blocks(operative):
+        for sentence in re.split(r"(?<=[:;.])\s+", text):
+            if _ANNEX.search(sentence) and _AMENDING_VERB.search(sentence):
+                for citation in iter_citations(sentence):
+                    found.setdefault(citation.celex, citation.raw)
+    return list(found.values())
 
 
 def _preceding_article_number(lines: list[Line], index: int) -> str | None:
@@ -162,7 +211,7 @@ def detect_targets(operative: list[Line], all_lines: list[Line] | None = None) -
                 headers.setdefault(citation.celex, line.lineno)
 
     for index, line in enumerate(operative):
-        match = ANCHOR.match(line.stripped)
+        match = match_anchor(line.stripped)
         if match is None:
             continue
         # An instruction container ("Article 3 is amended as follows:") has no
@@ -188,6 +237,9 @@ def detect_targets(operative: list[Line], all_lines: list[Line] | None = None) -
     # but they also cite *other* acts' titles, which are themselves of the form
     # "... amending X and Y as regards Z". Those are not this document describing
     # itself, so corroboration runs over the text with furniture stripped.
+    if not detection.targets:
+        detection.annexes = annexes_amended(operative)
+
     source = all_lines if all_lines is not None else operative
     detection.discrepancies = corroborate(detection.targets, strip_furniture(source).lines)
     return detection

@@ -86,8 +86,9 @@ def parse_citation(text: str) -> Citation | None:
     a_raw = match.group("a")
 
     if match.group("no"):
-        # "Regulation (EC) No 219/2009" — number first.
-        number, year = a, b
+        # "Regulation (EC) No 219/2009" — number first. Before 1999 the year had two
+        # digits, "Regulation (EEC) No 2913/92", and always meant the 20th century.
+        number, year = a, (1900 + b if len(match.group("b")) == 2 else b)
     elif len(a_raw) == 4 and _plausible_year(a):
         # "Directive 2003/87/EC", "Regulation (EU) 2015/757" — year first.
         year, number = a, b
