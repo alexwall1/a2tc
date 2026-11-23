@@ -442,3 +442,44 @@ def test_a_scope_stops_before_the_words_it_quotes(raw, scope, find):
     instruction = make(raw)
     assert instruction.scope_text == scope
     assert instruction.find_text == find
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Annexes amended by reference to an annex of the amending act, as worded in
+        # acts amending Regulations 2019/631, 2015/757, 2021/241 and Directive 2010/75.
+        "Annex V is amended in accordance with Annex III to this Regulation.",
+        "Annexes I, II, IV and V are amended in accordance with Annex II to this Directive.",
+        "Annex I is amended as set out in Annex I to this Regulation.",
+        "the text set out in Annex I to this Regulation is inserted as Annex IVa;",
+        "Annex Ia as set out in Annex II to this Directive is inserted;",
+        "the Annexes are amended in accordance with the Annexes to this Directive.",
+        "Annex IIb to Directive 2003/87/EC is replaced by the text appearing in Annex I "
+        "to this Directive.",
+    ],
+)
+def test_an_annex_amended_by_reference_is_external(raw):
+    assert make(raw).op is Op.EXTERNAL
+
+
+def test_an_instruction_quoting_an_annex_is_not_external():
+    instruction = make("in Article 3, the words ‘Annex I to this Directive’ are "
+                       "replaced by the words ‘Annex II’;")
+    assert instruction.op is Op.REPLACE_TEXT
+    assert instruction.find_text == "Annex I to this Directive"
+
+
+def test_replaced_as_follows_is_a_payload_replacement():
+    instruction = make("in Article 19(2), the first subparagraph is replaced as follows:")
+    assert instruction.op is Op.REPLACE_NODE
+    assert instruction.scope_text == "Article 19(2)"
+    assert instruction.target_text == "the first subparagraph"
+
+
+def test_replaced_by_the_words_is_a_text_replacement():
+    instruction = make("in Article 13, the words ‘Articles 7 to 11’ are replaced by "
+                       "the words ‘Articles 7 to 11a’;")
+    assert instruction.op is Op.REPLACE_TEXT
+    assert (instruction.find_text, instruction.replace_text) == (
+        "Articles 7 to 11", "Articles 7 to 11a")

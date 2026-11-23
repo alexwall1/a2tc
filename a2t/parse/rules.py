@@ -37,7 +37,17 @@ SCOPE_NO_COMMA = re.compile(r"^in\s+(?P<scope>the\s+title\s+of\s+[^,]+?)\s+the\s
 # "Annexes I to V are amended as set out in the Annexes to this Directive" and
 # "the text set out in the Annex to this Directive is added as the Annex" both
 # defer the actual text to a separate annex document.
-EXTERNAL = re.compile(r"set\s+out\s+in\s+the\s+Annexe?s?\b", re.I)
+EXTERNAL = re.compile(
+    r"set\s+out\s+in\s+the\s+Annexe?s?\b"
+    # An instruction about an annex whose new text is an annex of this very act:
+    # "Annex V is amended in accordance with Annex III to this Regulation", "Annex II is
+    # replaced by the text set out in Annex III to this Directive", "the text set out
+    # in Annex I to this Regulation is inserted as Annex IVa". It has to open on the
+    # annex, so a sentence that merely quotes one is not taken for it.
+    r"|^(?:the\s+(?:text\s+(?:set\s+out\s+)?(?:in|appearing\s+in)\s+)?)?Annexe?s?\b"
+    r"[^\u2018\u2019:]*\bto\s+this\s+(?:Directive|Regulation|Decision)\b",
+    re.I,
+)
 # The terminator is sometimes ";" rather than ":" — see Art. 1(33).
 CONTAINER = re.compile(
     r"^(?P<target>.+?)\s+(?:is|shall\s+be)\s+(?:hereby\s+)?amended\s+as\s+follows\s*[:;]?\s*$", re.I
@@ -50,7 +60,9 @@ DELETE_TEXT = re.compile(
 )
 REPLACE_TEXT = re.compile(
     rf"(?:the\s+(?:words?|date|figures?|numbers?|reference)\s+)?"
-    rf"{Q}(?P<find>.+?){Q}\s+(?:is|are|shall\s+be)\s+replaced\s+by\s+{Q}(?P<repl>.+?){Q}",
+    rf"{Q}(?P<find>.+?){Q}\s+(?:is|are|shall\s+be)\s+replaced\s+by\s+"
+    # "… are replaced by the words ‘Articles 7 to 11a’"
+    rf"(?:the\s+(?:words?|date|figures?|numbers?|reference)\s+)?{Q}(?P<repl>.+?){Q}",
     re.I,
 )
 
@@ -77,7 +89,8 @@ APPEND_NODE = re.compile(
 REPLACE_NODE = re.compile(
     # The auxiliary verb is occasionally omitted in the source; "by the following"
     # keeps the reading unambiguous. See Directive (EU) 2023/959, Art. 2(1)(d).
-    r"^(?P<target>.+?)\s+(?:(?:is|are|shall\s+be)\s+)?replaced\s+by\s+the\s+following",
+    # "is replaced as follows:" is the same instruction.
+    r"^(?P<target>.+?)\s+(?:(?:is|are|shall\s+be)\s+)?replaced\s+(?:by\s+the\s+following|as\s+follows)",
     re.I,
 )
 DELETE_NODE = re.compile(r"^(?P<target>.+?)\s+(?:is|are|shall\s+be)\s+deleted", re.I)

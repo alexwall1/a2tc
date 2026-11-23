@@ -143,6 +143,17 @@ ORDINAL_RUN = re.compile(r"^(?:the\s+)?(?P<ordinals>[a-z, -]+?)\s+(?P<noun>[a-z]
                          re.I)
 
 
+def _why_unread(raw: str) -> str:
+    """Why nothing read an instruction, where the reason is one worth naming."""
+    # What is missing from the tree is the more basic reason, so it is named first.
+    if re.search(r"\bthe\s+following\s+(?:title|section|subsection)s?\b", raw, re.I):
+        return "the tree has no title, section or subsection to insert"
+    if re.search(r"\binserted\s+before\b", raw, re.I):
+        return ("'inserted before' is not supported: the position would be ignored "
+                "and the text placed elsewhere")
+    return "no rule matched this instruction"
+
+
 def parse_enumeration(text: str | None) -> tuple[Kind, list[Step]] | None:
     """Parse a phrase addressing several provisions at once.
 
@@ -437,7 +448,7 @@ class Resolver:
             # It is not: nothing will be applied, and coverage has to say so. The
             # enclosing provision is kept as the place to report it.
             report.results.extend(self._refuse(
-                instruction, scoped, "no rule matched this instruction"))
+                instruction, scoped, _why_unread(instruction.raw)))
             return
 
         # "paragraphs 8 and 8a are deleted" — several targets. Without this the

@@ -574,3 +574,23 @@ def test_a_container_whose_target_is_readable_still_resolves_its_children():
     block = _container_block("Article 27 is amended as follows:", "paragraph 3 is deleted;")
     report = resolve_block(block, _act_with_two_articles())
     assert [r.status for r in report.results] == ["resolved", "resolved"]
+
+
+@pytest.mark.parametrize("raw, said", [
+    ("in Article 27, the following paragraph is inserted before paragraph 3a:",
+     "'inserted before' is not supported"),
+    ("the following title shall be inserted before Article 1:",
+     "no title, section or subsection"),
+    ("something entirely unlike an amendment", "no rule matched"),
+])
+def test_an_unread_instruction_says_why(raw, said):
+    instruction, result = _resolve_one(raw, _act_with_two_articles())
+    assert result.status == "unresolved"
+    assert said in result.reason
+
+
+def test_an_annex_by_reference_leaves_the_applicable_count():
+    instruction, result = _resolve_one(
+        "Annex V is amended in accordance with Annex III to this Regulation.",
+        _act_with_two_articles())
+    assert result.status == "not-applicable"
