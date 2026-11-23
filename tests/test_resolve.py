@@ -819,3 +819,65 @@ def test_a_chapter_numbered_in_arabic_digits_is_addressable():
     instruction, result = _resolve_one(
         "the title of Chapter 8 is replaced by the following:", act)
     assert result.status == "resolved"
+    assert result.targets_title
+
+
+# --------------------------------------------------------- a title is not its chapter
+
+
+def _act_with_a_titled_chapter(key="III"):
+    from a2t.model.tree import Act, Node
+
+    act = Act(celex="TEST", title="t")
+    chapter = act.root.add(Node(Kind.CHAPTER, key=key))
+    chapter.title = "STATIONARY INSTALLATIONS"
+    article = chapter.add(Node(Kind.ARTICLE, key="9"))
+    article.add(Node(Kind.SUBPARAGRAPH, text="The text of Article 9."))
+    return act
+
+
+@pytest.mark.parametrize("key", ["III", "8"])
+def test_replacing_a_chapters_title_edits_the_heading_and_leaves_the_chapter(key):
+    from a2t.apply.changeset import ChangeKind, build_changes
+
+    act = _act_with_a_titled_chapter(key)
+    instruction, result = _resolve_one(
+        f"the title of Chapter {key} is replaced by the following:", act)
+    instruction.payload = "STATIONARY AND AVIATION INSTALLATIONS"
+    (change,) = build_changes(result)
+
+    assert change.kind is ChangeKind.TITLE_EDIT
+    assert change.node.kind is Kind.CHAPTER
+    assert change.old_text == "STATIONARY INSTALLATIONS"
+    assert change.new_text == "STATIONARY AND AVIATION INSTALLATIONS"
+    assert act.article("9").text == "" and act.article("9").children   # untouched
+
+
+def test_an_edit_inside_a_chapter_whose_title_is_replaced_is_not_shadowed():
+    """It used to be reported "inside chapter 8, which 1.12 replaces in full"."""
+    from a2t.apply.changeset import ChangeKind, build_changeset
+    from a2t.model.instruction import Instruction, TargetBlock
+    from a2t.parse.rules import classify_all
+    from a2t.resolve.resolver import ResolutionReport
+
+    act = _act_with_a_titled_chapter("8")
+    title = Instruction(id="1", marker="1", level=1, source_line=1,
+                        raw="the title of Chapter 8 is replaced by the following:",
+                        payload="A NEW TITLE")
+    edit = Instruction(id="2", marker="2", level=1, source_line=2,
+                       raw="in Article 9, the first subparagraph is replaced by the "
+                           "following:", payload="New text of Article 9.")
+    block = TargetBlock(celex="TEST", citation="Test", root_scope=None,
+                        instructions=[title, edit])
+    classify_all([block])
+    changeset = build_changeset(resolve_block(block, act), act)
+
+    kinds = [c.kind for c in changeset.changes]
+    assert ChangeKind.TITLE_EDIT in kinds
+    assert not any("replaces in full" in (c.note or "") for c in changeset.changes)
+
+
+def test_the_title_of_a_chapter_the_act_does_not_have_is_unresolved():
+    instruction, result = _resolve_one(
+        "the title of Chapter 99 is replaced by the following:", _act_with_a_titled_chapter())
+    assert result.status == "unresolved"

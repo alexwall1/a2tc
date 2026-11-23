@@ -577,6 +577,17 @@ class Resolver:
             report.results.append(self._resolve_introduction(instruction, scoped))
             return
 
+        if (instruction.op is Op.REPLACE_NODE and instruction.target_text
+                and targets_title(instruction.target_text) and target_steps):
+            # "the title of Chapter 8 is replaced by the following:" names the heading.
+            # `parse_phrase` drops "the title of" and returns the chapter, so without
+            # this the chapter — articles and all — was replaced by the new title, and
+            # every edit inside it was then reported as impossible to show.
+            result = self._check(instruction, self._extend(scoped, target_steps))
+            result.targets_title = True
+            report.results.append(result)
+            return
+
         if instruction.target_text and OWN_TITLE.match(instruction.target_text.strip()):
             node = resolve(scoped, self.act) if scoped.steps else self.act.root
             report.results.append(
