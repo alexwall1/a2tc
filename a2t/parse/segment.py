@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from a2t.detect.targets import match_anchor
+from a2t.detect.targets import find_anchors
 from a2t.detect.celex import parse_citation
 from a2t.extract.pdf import Line
 from a2t.model.instruction import Instruction, Op, TargetBlock
@@ -510,18 +510,15 @@ def _is_heading(text: str) -> bool:
 
 def segment(operative: list[Line], targets) -> list[TargetBlock]:
     """Split the operative part into one `TargetBlock` per amended act."""
-    anchors: list[tuple[int, object]] = []
-    for index, line in enumerate(operative):
-        match = match_anchor(line.stripped)
-        if match and parse_citation(match.group("act")) is not None:
-            anchors.append((index, line))
+    anchors = find_anchors(operative)
 
     blocks: list[TargetBlock] = []
-    for position, (index, _) in enumerate(anchors):
+    for position, anchor in enumerate(anchors):
+        index = anchor.index
         target = targets[position] if position < len(targets) else None
         if target is None:
             continue
-        end = anchors[position + 1][0] if position + 1 < len(anchors) else len(operative)
+        end = anchors[position + 1].index if position + 1 < len(anchors) else len(operative)
 
         # After the last amending article come the act's own provisions —
         # "Article 3 / Transposition" and so on. Without this bound the final
@@ -543,6 +540,10 @@ def segment(operative: list[Line], targets) -> list[TargetBlock]:
             citation=target.citation.raw,
             root_scope=target.root_scope,
         )
-        block.instructions = _Segmenter(operative[index + 1:end], prefix).run()
+        body = operative[index + 1:end]
+        if anchor.inline:
+            # The anchor line is itself the instruction, less the clause naming the act.
+            body = [replace(operative[index], text=anchor.text)] + body
+        block.instructions = _Segmenter(body, prefix).run()
         blocks.append(block)
     return blocks

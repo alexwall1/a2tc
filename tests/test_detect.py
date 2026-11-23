@@ -268,3 +268,80 @@ def test_a_quoted_sentence_with_a_linking_word_is_still_not_an_anchor():
 )
 def test_a_two_digit_year_after_the_number_is_the_20th_century(text, celex):
     assert parse_citation(text).celex == celex
+
+
+# --------------------------- an article that is itself one instruction naming the act
+
+
+def _blocks(*texts):
+    from a2t.parse.rules import classify_all
+    from a2t.parse.segment import segment
+
+    operative = _operative(*texts)
+    blocks = segment(operative, detect_targets(operative).targets)
+    classify_all(blocks)
+    return blocks
+
+
+@pytest.mark.parametrize(
+    "sentence, celex, op, raw, target",
+    [
+        # Each wording is taken from an adopted act amending the Directive named.
+        ("Article 97 of Directive 2006/112/EC is replaced by the following:",
+         "32006L0112", "replace", "Article 97 is replaced by the following:",
+         "Article 97"),
+        ("In Article 12 of Directive 2003/87/EC, the following paragraphs are added:",
+         "32003L0087", "append",
+         "In Article 12, the following paragraphs are added:", "paragraphs"),
+        ("The following Article is inserted in Directive 2006/112/EC:",
+         "32006L0112", "insert", "The following Article is inserted:", "Article"),
+        ("In Directive 2006/112/EC, the following Articles are inserted:",
+         "32006L0112", "insert", "the following Articles are inserted:", "Articles"),
+    ],
+)
+def test_an_article_that_is_one_instruction_naming_the_act(sentence, celex, op, raw, target):
+    (block,) = _blocks("Article 1", sentence, "‘Article 129a", "Text of the provision.’")
+    (instruction,) = block.instructions
+
+    assert block.celex == celex
+    assert instruction.op.value == op
+    assert instruction.raw == raw
+    assert instruction.target_text == target
+    # Whatever follows is the payload, verbatim, not part of the instruction.
+    assert "Text of the provision." in instruction.payload
+
+
+def test_a_heading_between_the_article_and_its_instruction_is_allowed():
+    found = detect_targets(_operative(
+        "Article 1", "Amendment to Regulation (EC) No 80/2009",
+        "Article 12 of Regulation (EC) No 80/2009 is replaced by the following:"))
+    assert [t.celex for t in found.targets] == ["32009R0080"]
+    assert found.targets[0].inline
+
+
+def test_each_inline_article_gets_its_own_block():
+    blocks = _blocks(
+        "Article 14", "Amendment to Regulation (EU) 2017/745",
+        "In Article 106 of Regulation (EU) 2017/745, paragraph 14 is replaced by the "
+        "following:", "‘14. New text.’",
+        "Article 15", "Amendment to Regulation (EU) 2022/123",
+        "Article 3 of Regulation (EU) 2022/123 is deleted.")
+    assert [b.celex for b in blocks] == ["32017R0745", "32022R0123"]
+    assert "New text." in blocks[0].instructions[0].payload
+    assert blocks[1].instructions[0].op.value == "delete"
+
+
+def test_a_sentence_in_the_middle_of_a_payload_is_not_an_inline_instruction():
+    found = detect_targets(_operative(
+        "Article 1", "Directive 2003/87/EC is amended as follows:",
+        "(1) Article 3 is replaced by the following:",
+        "‘Article 3", "Article 5 of Directive 2008/98/EC is replaced by the following:’"))
+    assert [t.celex for t in found.targets] == ["32003L0087"]
+    assert not found.targets[0].inline
+
+
+def test_an_inline_instruction_naming_an_annex_is_left_to_the_annex_report():
+    found = detect_targets(_operative(
+        "Article 1", "Annex I to Directive 2003/87/EC is replaced by the following:"))
+    assert found.targets == []
+    assert found.annexes == ["Directive 2003/87/EC"]

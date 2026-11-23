@@ -115,6 +115,9 @@ class Target:
     amending_article: str | None  # article of the *amending* act carrying it
     anchor_line: int
     header_line: int | None = None
+    # The article carries one instruction that names the act itself, with no
+    # "is amended as follows" line above it. See `find_anchors`.
+    inline: bool = False
 
     @property
     def consolidated_celex(self) -> str:
@@ -193,6 +196,85 @@ def _preceding_article_number(lines: list[Line], index: int) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class Anchor:
+    """A line in the operative part that opens the amendments of one act."""
+
+    index: int
+    citation: Citation
+    scope: str | None
+    inline: bool = False
+    # For an inline anchor, the instruction as the amending act words it with the clause
+    # naming the act cut out — a span removed from the source, never text written.
+    text: str | None = None
+
+
+# An article that is itself one instruction:
+#   "Article 97 of Directive 2006/112/EC is replaced by the following:"
+#   "In Article 12 of Directive 2003/87/EC, the following paragraphs are added:"
+#   "The following Article is inserted in Directive 2006/112/EC:"
+# The verb must be on the same line as the citation, so a wrapped sentence is left
+# alone rather than guessed at.
+_INLINE_VERB = re.compile(
+    r"\b(?:is|are|shall\s+be)\s+(?:hereby\s+)?(?:replaced|deleted|inserted|added)\b"
+    r"|\b(?:replaced|inserted|added)\s+by\s+the\s+following\b", re.I)
+_QUOTE_OPENERS = "‘'“\""
+
+
+def _without_act(sentence: str, citation: Citation) -> str | None:
+    """`sentence` with the clause naming the act removed, or None if it cannot be."""
+    raw = re.escape(citation.raw)
+    # "In Directive 2006/112/EC, the following Articles are inserted:" — the whole
+    # opening clause is about the act and nothing else.
+    lead = re.match(rf"^In\s+{raw}\s*,\s*(?P<rest>\S.*)$", sentence, re.S)
+    if lead:
+        return lead.group("rest")
+    cut = re.sub(rf"\s+(?:of|in|to)\s+{raw}", "", sentence, count=1)
+    return cut if cut != sentence else None
+
+
+def _opens_amending_article(operative: list[Line], index: int) -> bool:
+    """Is line `index` the first text of an amending article?
+
+    The line above is "Article N", or a short heading ("Amendment to Regulation …")
+    that is itself below one. This is what keeps a sentence of quoted legislation that
+    happens to say "is replaced" from being read as an instruction.
+    """
+    above = [l.stripped for l in operative[max(0, index - 6):index] if not l.blank]
+    if not above:
+        return False
+    if ARTICLE_HEADING.match(above[-1]):
+        return True
+    return (len(above) >= 2 and ARTICLE_HEADING.match(above[-2]) is not None
+            and len(above[-1]) < 100 and not above[-1].endswith((":", ";", ".")))
+
+
+def find_anchors(operative: list[Line]) -> list[Anchor]:
+    """Every line that opens the amendments of one act, in document order.
+
+    Detection and segmentation both read this, so they cannot disagree about where
+    a block starts.
+    """
+    found: list[Anchor] = []
+    for index, line in enumerate(operative):
+        text = line.stripped
+        match = match_anchor(text)
+        if match is not None:
+            citation = parse_citation(match.group("act"))
+            if citation is not None:
+                found.append(Anchor(index, citation, match.group("scope")))
+            continue
+        if (not text or text[0] in _QUOTE_OPENERS or not _INLINE_VERB.search(text)
+                or re.search(r"\bAnnex(?:es)?\b", text)
+                or not _opens_amending_article(operative, index)):
+            continue
+        citation = parse_citation(text)
+        cut = _without_act(text, citation) if citation is not None else None
+        if citation is not None and cut is not None:
+            found.append(Anchor(index, citation, None, inline=True, text=cut))
+    return found
+
+
 def detect_targets(operative: list[Line], all_lines: list[Line] | None = None) -> Detection:
     """Find amendment targets in the operative part.
 
@@ -210,26 +292,20 @@ def detect_targets(operative: list[Line], all_lines: list[Line] | None = None) -
             if citation is not None:
                 headers.setdefault(citation.celex, line.lineno)
 
-    for index, line in enumerate(operative):
-        match = match_anchor(line.stripped)
-        if match is None:
-            continue
-        # An instruction container ("Article 3 is amended as follows:") has no
-        # citation in the subject position; a target anchor does.
-        citation = parse_citation(match.group("act"))
-        if citation is None:
-            continue
-
+    for anchor in find_anchors(operative):
+        index, citation = anchor.index, anchor.citation
+        line = operative[index]
         celex = citation.celex
         detection.targets.append(
             Target(
                 citation=citation,
                 celex=celex,
                 celex_source="eli" if celex in elis else "citation",
-                root_scope=match.group("scope"),
+                root_scope=anchor.scope,
                 amending_article=_preceding_article_number(operative, index),
                 anchor_line=line.lineno,
                 header_line=headers.get(celex),
+                inline=anchor.inline,
             )
         )
 
