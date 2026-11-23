@@ -116,9 +116,8 @@ class Preamble:
     whereas: str = "Whereas:"
     recitals: tuple[Para, ...] = ()
     enacting: str = ""
-    # (number, text) per document footnote referenced from the preamble. Word footnotes
-    # live in a separate OOXML part that `python-docx` cannot write, so these are
-    # printed where the Official Journal prints them: below the text that cites them.
+    # (number, text) per document footnote referenced from the preamble, written as real
+    # Word footnotes by `emit/tracked_docx.py`.
     footnotes: tuple[tuple[str, str], ...] = ()
     source_lines: tuple[int, int] = (0, 0)
     notes: list[str] = field(default_factory=list)

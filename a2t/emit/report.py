@@ -38,6 +38,8 @@ class RunReport:
     outcomes: list[ActOutcome] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     preamble: object | None = None
+    # The proposal's own articles (transposition, entry into force), which amend nothing.
+    own_provisions: list[str] = field(default_factory=list)
 
     def render(self) -> str:
         out: list[str] = []
@@ -48,6 +50,14 @@ class RunReport:
 
         if self.preamble is not None:
             self._preamble_section(add)
+
+        if self.own_provisions:
+            add("## The proposal's own provisions\n")
+            add("These articles belong to the proposal itself and amend no act, so they "
+                "are not converted:\n")
+            for entry in self.own_provisions:
+                add(f"- {entry}")
+            add("")
 
         add("## Acts amended\n")
         add("| Act | CELEX (version) | Scope | Identified via |")

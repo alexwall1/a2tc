@@ -43,6 +43,40 @@ def main() -> None:
     _echo_warnings()
 
 
+def _open_proposal(pdf: Path, as_of):
+    """Lines, operative part, detection and date for a command that needs all four.
+
+    Commands that read the proposal each did this inline and failed differently — a
+    traceback for a missing `pdftotext`, a `None` date passed on to retrieval. One place
+    now turns each of those into a message and a non-zero exit.
+    """
+    try:
+        lines = extract_lines(pdf)
+        operative = operative_part(lines).lines
+        detection = detect_targets(operative, lines)
+    except (ExtractionError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not detection.targets:
+        raise click.ClickException(detection.explain_empty())
+    on_date = as_of.date() if as_of else find_proposal_date(lines)
+    if on_date is None:
+        raise click.ClickException("could not find the proposal date; pass --as-of")
+    return lines, operative, detection, on_date
+
+
+def _unused_name(outdir: Path, stem: str, suffix: str, taken: set[Path]) -> Path:
+    """`outdir/stem+suffix`, or with _2, _3 … when this run already wrote that name.
+
+    Two blocks for one act that could not be merged (they amend different scopes of it)
+    name the same file; the second must not replace the first.
+    """
+    candidate, n = outdir / f"{stem}{suffix}", 1
+    while candidate in taken:
+        n += 1
+        candidate = outdir / f"{stem}_{n}{suffix}"
+    return candidate
+
+
 @main.command()
 @click.argument("pdf", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--out", type=click.Path(dir_okay=False, path_type=Path),
@@ -202,23 +236,18 @@ def retrieve(pdf: Path, cache: Path, refresh: bool, as_of) -> None:
     for target in detection.targets:
         base = target.consolidated_celex
         click.echo(f"{target.citation.raw}")
+        # The same acquisition `convert` uses, fallbacks included: a command that shows
+        # what would be retrieved must not fail where the conversion would succeed.
         try:
-            pinned = select_version(base, on_date)
-        except VersionError as exc:
-            click.echo(f"  version selection failed: {exc}")
-            failures += 1
-            continue
-        click.echo(f"  version   {pinned}  (in force at {on_date.isoformat()})")
-        pending = publication_warning(base, on_date)
-        if pending:
-            click.echo(f"  WARNING   {pending}")
-
-        try:
-            retrieved = provider.fetch(pinned)
-        except RetrievalError as exc:
+            acquired = acquire(provider, base, on_date)
+        except (VersionError, RetrievalError) as exc:
             click.echo(f"  retrieval failed: {exc}")
             failures += 1
             continue
+        pinned, retrieved = acquired.pinned, acquired.retrieved
+        click.echo(f"  version   {pinned}  (in force at {on_date.isoformat()})")
+        if acquired.warning:
+            click.echo(f"  WARNING   {acquired.warning}")
 
         if not title_matches(target.citation, retrieved.title):
             click.echo(
@@ -229,9 +258,14 @@ def retrieve(pdf: Path, cache: Path, refresh: bool, as_of) -> None:
             continue
         click.echo(f"  title     {retrieved.title[:66]}")
 
-        act = assemble(
-            retrieved.full_text_html, pinned, retrieved.title, retrieved.version_date
-        )
+        try:
+            act = assemble(
+                retrieved.full_text_html, pinned, retrieved.title, retrieved.version_date
+            )
+        except AssemblyError as exc:
+            click.echo(f"  assembly failed: {exc}")
+            failures += 1
+            continue
         click.echo(
             f"  structure {len(act.articles)} articles, "
             f"{act.count(Kind.PARAGRAPH)} paragraphs, "
@@ -372,7 +406,7 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
     from a2t.emit.report import ActOutcome, RunReport, write_report
     from a2t.extract.preamble import PreambleError, preamble as read_preamble
     from a2t.parse.rules import classify_all
-    from a2t.parse.segment import segment
+    from a2t.parse.segment import own_provisions, segment
     from a2t.resolve.fallback import apply_llm_fallback
     from a2t.resolve.llm import LlmResolver, OpenRouterClient
     from a2t.resolve.resolver import resolve_block
@@ -417,6 +451,7 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
     by_celex = {t.celex: t for t in detection.targets}
     run = RunReport(source=pdf, proposal_date=on_date.isoformat(),
                     detection_targets=detection.targets,
+                    own_provisions=own_provisions(operative, detection.targets),
                     discrepancies=detection.discrepancies,
                     preamble=front)
 
@@ -429,6 +464,7 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
     click.echo()
 
     failures: list[str] = []
+    written: set[Path] = set()
     for block in blocks:
         target = by_celex[block.celex]
         try:
@@ -463,7 +499,8 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
             apply_llm_fallback(resolution, act, llm_resolver)
         changeset = build_changeset(resolution, act)
 
-        document = outdir / f"{pinned}_tracked.docx"
+        document = _unused_name(outdir, f"{pinned}_tracked", ".docx", written)
+        written.add(document)
         emitted = emit_document(act, changeset, document, author=author,
                                 version_warning=acquired.warning,
                                 preamble=front)
@@ -494,6 +531,9 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
     if flagged:
         click.echo(f"{flagged} change(s) need human review — see the report "
                    f"and the Word comments.")
+    if failures:
+        # Exit 0 after "NOT CONVERTED" reads as success to a script or a CI step.
+        raise SystemExit(1)
 
 
 @main.command()
@@ -512,13 +552,10 @@ def diff(pdf: Path, cache: Path, as_of, show: str | None) -> None:
     from a2t.parse.segment import segment
     from a2t.resolve.resolver import resolve_block
 
-    lines = extract_lines(pdf)
-    operative = operative_part(lines).lines
-    detection = detect_targets(operative, lines)
+    lines, operative, detection, on_date = _open_proposal(pdf, as_of)
     blocks = segment(operative, detection.targets)
     classify_all(blocks)
 
-    on_date = as_of.date() if as_of else find_proposal_date(lines)
     provider = EurlexBuilderProvider(cache_dir=cache)
     by_celex = {t.celex: t for t in detection.targets}
 
@@ -526,11 +563,11 @@ def diff(pdf: Path, cache: Path, as_of, show: str | None) -> None:
         target = by_celex[block.celex]
         try:
             acquired = acquire(provider, target.consolidated_celex, on_date)
-        except (VersionError, RetrievalError) as exc:
+            pinned, retrieved = acquired.pinned, acquired.retrieved
+            act = assemble(retrieved.full_text_html, pinned, retrieved.title)
+        except (VersionError, RetrievalError, AssemblyError) as exc:
             click.echo(f"{block.citation}: SKIPPED — {exc}\n")
             continue
-        pinned, retrieved = acquired.pinned, acquired.retrieved
-        act = assemble(retrieved.full_text_html, pinned, retrieved.title)
         changeset = build_changeset(resolve_block(block, act), act)
 
         if show:
@@ -595,13 +632,10 @@ def llm_eval(pdf: Path, cache: Path, llm_cache: Path, model: str | None,
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    lines = extract_lines(pdf)
-    operative = operative_part(lines).lines
-    detection = detect_targets(operative, lines)
+    lines, operative, detection, on_date = _open_proposal(pdf, as_of)
     blocks = segment(operative, detection.targets)
     classify_all(blocks)
 
-    on_date = as_of.date() if as_of else find_proposal_date(lines)
     provider = EurlexBuilderProvider(cache_dir=cache)
     by_celex = {t.celex: t for t in detection.targets}
 
@@ -614,9 +648,13 @@ def llm_eval(pdf: Path, cache: Path, llm_cache: Path, model: str | None,
         if remaining <= 0:
             break
         target = by_celex[block.celex]
-        pinned = select_version(target.consolidated_celex, on_date)
-        retrieved = provider.fetch(pinned)
-        act = assemble(retrieved.full_text_html, pinned, retrieved.title)
+        try:
+            acquired = acquire(provider, target.consolidated_celex, on_date)
+            pinned, retrieved = acquired.pinned, acquired.retrieved
+            act = assemble(retrieved.full_text_html, pinned, retrieved.title)
+        except (VersionError, RetrievalError, AssemblyError) as exc:
+            click.echo(f"{block.citation}: SKIPPED — {exc}\n")
+            continue
         report = resolve_block(block, act)
 
         result = evaluate(report.resolved, act, resolver, limit=remaining)

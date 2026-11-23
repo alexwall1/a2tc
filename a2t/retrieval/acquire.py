@@ -29,7 +29,7 @@ from datetime import date
 
 from a2t.retrieval.base import BaseActProvider, RetrievalError, RetrievedAct
 from a2t.retrieval.versions import (
-    list_versions, parse_pinned, publication_warning, select_version,
+    VersionError, list_versions, parse_pinned, publication_warning, select_version,
 )
 
 
@@ -53,7 +53,20 @@ class Acquisition:
 def acquire(provider: BaseActProvider, base_celex: str,
             on_date: date) -> Acquisition:
     """Fetch the act, falling back to the nearest usable consolidation."""
-    requested = select_version(base_celex, on_date)
+    available = list_versions(base_celex)
+    try:
+        requested = select_version(base_celex, on_date, available)
+    except VersionError as exc:
+        # Consolidations exist, but none had appeared by the proposal date: the act had
+        # not been amended or consolidated, so the text the drafters worked from was
+        # the act as adopted. With no consolidation at all there is nothing to say
+        # the act was never amended, and guessing would convert against the wrong text.
+        if not available:
+            raise
+        return _as_adopted(
+            provider, base_celex, on_date, sorted(available), base_celex, (),
+            f"{base_celex} had no consolidated version at or before "
+            f"{on_date.isoformat()}", exc)
     # Independent of retrievability: the version in force may postdate the proposal.
     pending = publication_warning(base_celex, on_date)
     notes = (pending,) if pending else ()
@@ -65,7 +78,6 @@ def acquire(provider: BaseActProvider, base_celex: str,
         # the block ends, and both failure paths below still need to report it.
         first_error = exc
 
-    available = list_versions(base_celex)
     requested_date = parse_pinned(requested)
     anchor = requested_date[1] if requested_date else on_date
 
@@ -96,34 +108,44 @@ def acquire(provider: BaseActProvider, base_celex: str,
 
     later = sorted(d for d in available if d > anchor)
     if later:
-        # Nothing consolidated before the proposal date means the act had not been
-        # amended by then, so the text the drafters worked against was the act as
-        # adopted. That is not a substitution but the right answer: sector 3 is the
-        # law as it stood, where a later consolidation is the law as it became.
-        as_adopted = f"3{base_celex[1:]}"
-        try:
-            retrieved = provider.fetch(as_adopted)
-        except RetrievalError:
-            raise RetrievalError(
-                f"{requested} — the version of {base_celex} in force at "
-                f"{on_date.isoformat()} — has no retrievable English text, neither "
-                f"does any earlier consolidation, and the act as adopted "
-                f"({as_adopted}) could not be retrieved either. The only "
-                f"consolidations that exist are later (from {later[0].isoformat()}) "
-                f"and already carry amendments made after the proposal was drafted, "
-                f"possibly its own if it has since been adopted; converting against "
-                f"one would compare the proposal with its own result."
-            ) from first_error
-        return Acquisition(
-            retrieved, as_adopted, requested,
-            warnings=notes + (
-                f"{base_celex} had not been amended when the proposal was drafted, so "
-                f"no consolidation of it existed; the base text is the act as adopted "
-                f"({as_adopted}). Its first consolidation is "
-                f"{later[0].isoformat()}, after the proposal date.",
-            ),
-        )
+        return _as_adopted(
+            provider, base_celex, on_date, later, requested, notes,
+            f"{requested} — the version of {base_celex} in force at "
+            f"{on_date.isoformat()} — has no retrievable English text, neither does "
+            f"any earlier consolidation", first_error)
 
     raise RetrievalError(
         f"no usable consolidated version of {base_celex}: {first_error}"
+    )
+
+
+def _as_adopted(provider: BaseActProvider, base_celex: str, on_date: date,
+                later: list[date], requested: str, notes: tuple[str, ...],
+                problem: str, cause: Exception) -> Acquisition:
+    """The act as adopted (sector 3), for an act with nothing consolidated before.
+
+    Nothing consolidated before the proposal date means the act had not been amended by
+    then, so the text the drafters worked against was the act as adopted. That is not a
+    substitution but the right answer: sector 3 is the law as it stood, where a later
+    consolidation is the law as it became.
+    """
+    as_adopted = f"3{base_celex[1:]}"
+    try:
+        retrieved = provider.fetch(as_adopted)
+    except RetrievalError:
+        raise RetrievalError(
+            f"{problem}, and the act as adopted ({as_adopted}) could not be "
+            f"retrieved either. The only consolidations that exist are later (from "
+            f"{later[0].isoformat()}) and already carry amendments made after the "
+            f"proposal was drafted, possibly its own if it has since been adopted; "
+            f"converting against one would compare the proposal with its own result."
+        ) from cause
+    return Acquisition(
+        retrieved, as_adopted, requested,
+        warnings=notes + (
+            f"{base_celex} had not been amended when the proposal was drafted, so "
+            f"no consolidation of it existed; the base text is the act as adopted "
+            f"({as_adopted}). Its first consolidation is "
+            f"{later[0].isoformat()}, after the proposal date.",
+        ),
     )

@@ -1109,3 +1109,19 @@ def test_report_records_unapplied_instructions():
     rendered = make_report(act, changeset).render()
     assert "### Not applied" in rendered
     assert "unresolved target" in rendered
+
+
+def test_output_names_are_never_reused_within_a_run(tmp_path):
+    from a2t.cli import _unused_name
+
+    taken = set()
+    first = _unused_name(tmp_path, "02003L0087-20240301_tracked", ".docx", taken)
+    taken.add(first)
+    second = _unused_name(tmp_path, "02003L0087-20240301_tracked", ".docx", taken)
+    taken.add(second)
+    third = _unused_name(tmp_path, "02003L0087-20240301_tracked", ".docx", taken)
+    assert [p.name for p in (first, second, third)] == [
+        "02003L0087-20240301_tracked.docx",
+        "02003L0087-20240301_tracked_2.docx",
+        "02003L0087-20240301_tracked_3.docx",
+    ]

@@ -345,3 +345,67 @@ def test_an_inline_instruction_naming_an_annex_is_left_to_the_annex_report():
         "Article 1", "Annex I to Directive 2003/87/EC is replaced by the following:"))
     assert found.targets == []
     assert found.annexes == ["Directive 2003/87/EC"]
+
+
+# ------------------------------------------- one act amended in more than one article
+
+
+def test_an_act_amended_in_two_articles_is_one_block():
+    """Each block used to write its own document, the second over the first."""
+    blocks = _blocks(
+        "Article 1", "Directive 2003/87/EC is amended as follows:",
+        "(1) Article 5 is deleted;", "(2) Article 6 is deleted.",
+        "Article 2", "Directive 2008/98/EC is amended as follows:",
+        "(1) Article 3 is deleted.",
+        "Article 3", "Directive 2003/87/EC is amended as follows:",
+        "(1) Article 9 is deleted.",
+        "Article 4", "This Directive shall enter into force on the twentieth day.")
+    assert [b.celex for b in blocks] == ["32003L0087", "32008L0098"]
+    first = blocks[0]
+    assert [i.id for i in first.walk()] == ["1.1", "1.2", "3.1"]
+    assert [i.target_text for i in first.walk()] == ["Article 5", "Article 6", "Article 9"]
+
+
+def test_blocks_for_one_act_with_different_scopes_stay_apart():
+    blocks = _blocks(
+        "Article 1", "Directive 2003/87/EC is amended as follows:",
+        "(1) Article 5 is deleted.",
+        "Article 2", "Article 3 of Directive 2003/87/EC is amended as follows:",
+        "(1) paragraph 2 is deleted.")
+    assert [b.root_scope for b in blocks] == [None, "3"]
+
+
+# --------------------------------------- what the proposal itself enacts, listed not lost
+
+
+def _own(*texts):
+    from a2t.parse.segment import own_provisions
+
+    operative = _operative(*texts)
+    return own_provisions(operative, detect_targets(operative).targets)
+
+
+def test_the_proposals_own_articles_are_listed():
+    assert _own(
+        "Article 1", "Directive 2003/87/EC is amended as follows:",
+        "(1) Article 5 is deleted.",
+        "Article 2", "Transposition", "1. Member States shall adopt the measures.",
+        "Article 3", "Entry into force", "This Directive shall enter into force.",
+    ) == ["Article 2 — Transposition", "Article 3 — Entry into force"]
+
+
+def test_nothing_is_listed_when_every_article_amends():
+    assert _own("Article 1", "Directive 2003/87/EC is amended as follows:",
+                "(1) Article 5 is deleted.") == []
+
+
+def test_the_report_lists_the_proposals_own_provisions():
+    from pathlib import Path
+
+    from a2t.emit.report import RunReport
+
+    text = RunReport(source=Path("p.pdf"), proposal_date="2026-07-17",
+                     own_provisions=["Article 2 — Transposition"]).render()
+    assert "## The proposal's own provisions" in text
+    assert "- Article 2 — Transposition" in text
+    assert "amend no act" in text

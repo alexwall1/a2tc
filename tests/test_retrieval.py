@@ -286,3 +286,41 @@ def test_config_disables_translation():
     translation = config["processing"]["translation"]
     assert translation["translate_full_text"] is False
     assert translation["translate_text_units"] is False
+
+
+def test_no_consolidation_by_the_proposal_date_falls_back_to_the_act_as_adopted(
+    monkeypatch,
+):
+    """Regulation (EC) No 80/2009 against a 2024 proposal: first consolidated later.
+
+    `select_version` refuses a version the drafters never saw, which is right, but the
+    act as adopted is what they did see — the same answer as when the consolidation
+    in force exists but has no English text.
+    """
+    _versions(monkeypatch, date(2025, 3, 1))
+    provider = _Provider("32009R0080", "02009R0080-20250301")
+
+    acquired = acquire(provider, "02009R0080", date(2024, 4, 24))
+
+    assert acquired.pinned == "32009R0080"
+    assert acquired.substituted
+    assert "had not been amended" in acquired.warning
+    assert "02009R0080-20250301" not in provider.tried
+
+
+def test_no_consolidation_at_all_still_raises(monkeypatch):
+    """With nothing to say the act was never amended, guessing would be wrong."""
+    _versions(monkeypatch)
+
+    with pytest.raises(VersionError):
+        acquire(_Provider("32009R0080"), "02009R0080", date(2024, 4, 24))
+
+
+def test_no_consolidation_by_the_date_and_no_act_as_adopted_says_both(monkeypatch):
+    _versions(monkeypatch, date(2025, 3, 1))
+
+    with pytest.raises(RetrievalError) as excinfo:
+        acquire(_Provider("02009R0080-20250301"), "02009R0080", date(2024, 4, 24))
+
+    assert "32009R0080" in str(excinfo.value)
+    assert "2025-03-01" in str(excinfo.value)

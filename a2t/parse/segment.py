@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from a2t.detect.targets import find_anchors
+from a2t.detect.targets import ARTICLE_HEADING as OWN_ARTICLE, find_anchors
 from a2t.detect.celex import parse_citation
 from a2t.extract.pdf import Line
 from a2t.model.instruction import Instruction, Op, TargetBlock
@@ -558,4 +558,46 @@ def segment(operative: list[Line], targets) -> list[TargetBlock]:
             body = [replace(operative[index], text=anchor.text)] + body
         block.instructions = _Segmenter(body, prefix).run()
         blocks.append(block)
-    return blocks
+    return _merge_same_act(blocks)
+
+
+def _merge_same_act(blocks: list[TargetBlock]) -> list[TargetBlock]:
+    """One block per act and scope, however many articles amend it.
+
+    A proposal that amends the same act in Article 1 and again in Article 4 produced two
+    blocks, and everything downstream treats a block as an act: each was resolved on its
+    own and wrote the same file, so the second document replaced the first. Instruction
+    ids carry the amending article's number, so the two sets do not collide. Blocks with
+    different scopes stay apart — the scope is resolved per block.
+    """
+    merged: dict[tuple[str, str | None], TargetBlock] = {}
+    for block in blocks:
+        key = (block.celex, block.root_scope)
+        if key in merged:
+            merged[key].instructions.extend(block.instructions)
+        else:
+            merged[key] = block
+    return list(merged.values())
+
+
+def own_provisions(operative: list[Line], targets) -> list[str]:
+    """The proposal's own articles after the last one that amends something.
+
+    "Article 3 Transposition", "Article 4 Entry into force": they do not amend an act,
+    so nothing converts them, and `segment` cuts them off so they are not read into the
+    last instruction's payload. Cut silently they are indistinguishable from articles
+    the tool failed to read, so the report lists them.
+    """
+    amending = [int(t.amending_article) for t in targets
+                if t.amending_article and t.amending_article.isdigit()]
+    last_anchor = max((t.anchor_line for t in targets), default=None)
+    if not amending or last_anchor is None:
+        return []
+    found: list[str] = []
+    for index, line in enumerate(operative):
+        match = OWN_ARTICLE.match(line.stripped)
+        if match is None or line.lineno <= last_anchor or int(match.group("number")) <= max(amending):
+            continue
+        title = next((l.stripped for l in operative[index + 1:index + 4] if not l.blank), "")
+        found.append(f"Article {match.group('number')}" + (f" — {title}" if title else ""))
+    return found
