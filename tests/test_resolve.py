@@ -419,3 +419,94 @@ def test_what_an_unread_instruction_contains_is_reported_not_lost():
 
     assert by_id["1.a.i"].status == "unresolved"
     assert "1.a" in by_id["1.a.i"].reason
+
+
+# ------------------------------------------- scopes written the way the Journal cites
+
+
+@pytest.mark.parametrize(
+    "phrase, steps",
+    [
+        # Wordings from adopted acts amending Directives 2003/87, 2010/75, 2014/65.
+        ("Article 27(3)", [Step(Kind.ARTICLE, key="27"), Step(Kind.PARAGRAPH, key="3")]),
+        ("Article 4(1)", [Step(Kind.ARTICLE, key="4"), Step(Kind.PARAGRAPH, key="1")]),
+        ("Article 25(4)(a)", [Step(Kind.ARTICLE, key="25"), Step(Kind.PARAGRAPH, key="4"),
+                              Step(Kind.POINT, key="a")]),
+        ("point (a) of Article 25(4)",
+         [Step(Kind.ARTICLE, key="25"), Step(Kind.PARAGRAPH, key="4"),
+          Step(Kind.POINT, key="a")]),
+        ("Article 9(1)(c)(ii)",
+         [Step(Kind.ARTICLE, key="9"), Step(Kind.PARAGRAPH, key="1"),
+          Step(Kind.POINT, key="c"), Step(Kind.SUBPOINT, key="ii")]),
+        ("Article 2(1), second sentence",
+         [Step(Kind.ARTICLE, key="2"), Step(Kind.PARAGRAPH, key="1"),
+          Step(Kind.SENTENCE, index=2)]),
+        ("point (a) of paragraph 2", [Step(Kind.PARAGRAPH, key="2"), Step(Kind.POINT, key="a")]),
+    ],
+)
+def test_parse_compact_and_inverted_citations(phrase, steps):
+    assert parse_phrase(phrase) == steps
+
+
+def test_an_inverted_phrase_with_an_unreadable_side_is_refused():
+    assert parse_phrase("something of Article 3") == []
+
+
+def _act_with_two_articles():
+    from a2t.model.tree import Act, Node
+
+    act = Act(celex="TEST", title="t")
+    first = act.root.add(Node(Kind.ARTICLE, key="1"))
+    first.add(Node(Kind.SUBPARAGRAPH, text="This Directive lays down rules."))
+    first.add(Node(Kind.SUBPARAGRAPH, text="It also provides for reductions."))
+    article = act.root.add(Node(Kind.ARTICLE, key="27"))
+    paragraph = article.add(Node(Kind.PARAGRAPH, key="3"))
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="First words."))
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="Second words."))
+    return act
+
+
+def _resolve_one(raw: str, act):
+    from a2t.model.instruction import Instruction, TargetBlock
+    from a2t.parse.rules import classify_all
+
+    instruction = Instruction(id="1.1", marker="1", level=1, source_line=1, raw=raw)
+    block = TargetBlock(celex="TEST", citation="Test", root_scope=None,
+                        instructions=[instruction])
+    classify_all([block])
+    return instruction, resolve_block(block, act).results[0]
+
+
+def test_a_compact_scope_lands_on_the_article_it_names_not_on_article_1():
+    """It used to resolve to Article 1's second subparagraph and say nothing."""
+    instruction, result = _resolve_one(
+        "In Article 27(3), the second subparagraph is replaced by the following:",
+        _act_with_two_articles())
+    assert result.status == "resolved"
+    assert result.node.text == "Second words."
+
+
+def test_a_scope_that_cannot_be_read_is_unresolved_not_inherited():
+    instruction, result = _resolve_one(
+        "In the arrangements for the transitional period, the second subparagraph "
+        "is replaced by the following:", _act_with_two_articles())
+    assert result.status == "unresolved"
+    assert "could not be read" in result.reason
+    assert result.node is None
+
+
+def test_what_sits_inside_an_unreadable_scope_is_refused_with_it():
+    from a2t.model.instruction import Instruction, TargetBlock
+    from a2t.parse.rules import classify_all
+
+    container = Instruction(id="1", marker="1", level=1, source_line=1,
+                            raw="In the arrangements for the transitional period, "
+                                "Article 27 is amended as follows:")
+    inner = Instruction(id="1.a", marker="a", level=2, source_line=2,
+                        raw="paragraph 3 is deleted;")
+    container.children.append(inner)
+    block = TargetBlock(celex="TEST", citation="Test", root_scope=None,
+                        instructions=[container])
+    classify_all([block])
+    report = resolve_block(block, _act_with_two_articles())
+    assert [r.status for r in report.results] == ["unresolved", "unresolved"]

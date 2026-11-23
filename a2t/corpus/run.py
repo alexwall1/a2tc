@@ -43,13 +43,43 @@ AGREEMENT_THRESHOLD = 0.95
 _LEADING_MARKER = re.compile(r"^\s*[\(\u2018\u2019]?\s*\d+[a-z]?\s*[\)\.]\s+"
                              r"|^\s*\([a-z]{1,3}\)\s+", re.I)
 _QUOTES = str.maketrans({"\u201c": "'", "\u201d": "'", "\u2018": "'",
-                         "\u2019": "'", '"': "'"})
+                         "\u2019": "'", '"': "'",
+                         # Hyphen variants: "third\u2010country" and "third-country".
+                         "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-"})
+# A footnote reference is "(*)" in the amending act and "( )" in the consolidation.
+_NOTE_MARK = re.compile(r"\(\s*\*{0,3}\s*\)")
+# Numbers and letters that mark a provision inside running text: "2.", "(a)", "(ii)".
+# The consolidation keeps them in a node's key, so they are not in its text at all.
+_INNER_MARKER = re.compile(r"(?<!\S)(?:\d+[a-z]?\.|\([0-9a-z]{1,4}\))(?=\s|$)", re.I)
+_ARTICLE_HEAD = re.compile(r"^Article\s+\d+[a-z]*\b", re.I)
 
 
 def comparable(text: str) -> str:
     """Strip presentation the consolidation stores differently."""
     text = re.sub(r"\s+", " ", text or "").strip().translate(_QUOTES)
-    return _LEADING_MARKER.sub("", text).strip()
+    text = _LEADING_MARKER.sub("", text).strip()
+    # The footnote text itself follows the provision: "(*) Directive 2012/27/EU … ."
+    # Only the second sighting of the first marker opens it.
+    marks = [m for m in re.finditer(r"\(\*+\)", text)]
+    if len(marks) >= 2 and marks[0].group() == marks[1].group():
+        text = text[:marks[1].start()]
+    text = _NOTE_MARK.sub(" ", text)
+    text = re.sub(r"\bCO\s+2\b", "CO2", text)
+    text = re.sub(r"\s+([,;:.])", r"\1", text)
+    return re.sub(r"\s+", " ", _INNER_MARKER.sub(" ", text)).strip()
+
+
+def _without_heading(new: str, published: str) -> str:
+    """Drop the "Article 28c Provisions for monitoring" a replaced article opens with.
+
+    A replacement of a whole article carries its number and title; the consolidation
+    keeps them apart from the body. The body starts where the published text does.
+    """
+    if not _ARTICLE_HEAD.match(new) or _ARTICLE_HEAD.match(published):
+        return new
+    opening = " ".join(published.split()[:4])
+    at = new.find(opening) if opening else -1
+    return new[at:] if at > 0 else new
 
 
 @dataclass
@@ -229,17 +259,47 @@ def compare_against(changeset, truth: Act) -> tuple[int, int]:
             continue
         if change.node is None:
             continue
-        published = _same_provision(change.node, truth)
-        if published is None:
+        runs = _published_runs(change.node, truth)
+        if not runs:
             continue
         compared += 1
-        if similarity(comparable(change.new_text),
-                      comparable(published)) >= AGREEMENT_THRESHOLD:
+        if agrees(change.new_text, runs):
             agreed += 1
     return compared, agreed
 
 
-def _same_provision(node, truth: Act) -> str | None:
+def agrees(new_text: str, runs: list[str]) -> bool:
+    """Does the replacement read as one of the published runs?"""
+    new = comparable(new_text)
+    best = 0.0
+    for published in runs:
+        wanted = comparable(published)
+        best = max(best, similarity(_without_heading(new, wanted), wanted))
+    return best >= AGREEMENT_THRESHOLD
+
+
+def _published_runs(node, truth: Act) -> list[str]:
+    """The published text of a provision, then of it together with its next siblings.
+
+    One block of a proposal often replaces a provision with several — a first
+    subparagraph with two, a point with a point and a new one after it — and the
+    consolidation then holds them side by side. Reading only the first would score the
+    replacement as wrong for being complete.
+    """
+    found = _same_node(node, truth)
+    if found is None:
+        return []
+    siblings = [c for c in (found.parent.children if found.parent else [found])
+                if c.kind is found.kind]
+    at = next((i for i, c in enumerate(siblings) if c is found), 0)
+    runs, text = [], []
+    for sibling in siblings[at:at + 8]:
+        text.append(sibling.full_text)
+        runs.append("\n".join(text))
+    return runs
+
+
+def _same_node(node, truth: Act):
     """Locate a node's counterpart in another version of the same act."""
     from a2t.model.tree import Kind
 
@@ -264,7 +324,7 @@ def _same_provision(node, truth: Act) -> str | None:
             found.by_key(step.kind, step.key) if step.key is not None
             else found.by_index(step.kind, step.index)
         )
-    return found.full_text if found is not None else None
+    return found
 
 
 def summarise(results: list[DocumentResult]) -> str:

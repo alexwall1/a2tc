@@ -220,10 +220,65 @@ def parse_phrase(text: str | None) -> list[Step]:
         cleaned = title.group("inner")
     steps: list[Step] = []
     for fragment in [f.strip() for f in cleaned.split(",") if f.strip()]:
-        step = _parse_fragment(fragment)
-        if step is None:
+        parsed = _parse_located(fragment)
+        if parsed is None:
             return []  # an unparseable fragment invalidates the whole phrase
-        steps.append(step)
+        steps.extend(parsed)
+    return steps
+
+
+# "Article 27(3)", "Article 25(4)(a)" — an article with the provision inside it named
+# the way the Official Journal cites it. Without this the whole scope is unreadable.
+COMPACT = re.compile(r"^(?:the\s+)?Article\s+(?P<article>\d+[a-z]*)(?P<inner>(?:\([0-9a-z-]+\))+)$",
+                     re.I)
+ROMAN_KEY = re.compile(r"^(?:i{1,3}|iv|vi{0,3}|ix|x)$", re.I)
+OF = re.compile(r"\s+of\s+", re.I)
+
+
+def _compact_steps(match: re.Match) -> list[Step]:
+    """Article 25(4)(a) -> article 25, paragraph 4, point (a)."""
+    steps = [Step(Kind.ARTICLE, key=match.group("article").lower())]
+    for key in re.findall(r"\(([0-9a-z-]+)\)", match.group("inner").lower()):
+        previous = steps[-1].kind
+        if previous is Kind.ARTICLE and key[0].isdigit():
+            kind = Kind.PARAGRAPH
+        elif previous is Kind.POINT and ROMAN_KEY.match(key):
+            kind = Kind.SUBPOINT
+        else:
+            kind = Kind.POINT
+        steps.append(Step(kind, key=key))
+    return steps
+
+
+def _parse_located(fragment: str) -> list[Step] | None:
+    """One comma-separated piece of a phrase, as the steps it names.
+
+    "point (a) of Article 25(4)" names the same provision as "Article 25(4), point
+    (a)", with the innermost provision written first. Each side of "of" has to read
+    on its own, or the whole piece is refused — "the title of Chapter III" and the like
+    are not split here.
+    """
+    compact = COMPACT.match(fragment)
+    if compact:
+        return _compact_steps(compact)
+
+    single = _parse_fragment(fragment)
+    if single is not None:
+        return [single]
+
+    parts = OF.split(fragment)
+    if len(parts) < 2:
+        return None
+    steps: list[Step] = []
+    for part in reversed(parts):  # outermost last in the text, first in the path
+        compact = COMPACT.match(part.strip())
+        if compact:
+            steps.extend(_compact_steps(compact))
+            continue
+        single = _parse_fragment(part.strip())
+        if single is None:
+            return None
+        steps.append(single)
     return steps
 
 
@@ -291,14 +346,21 @@ class Resolver:
 
     # ------------------------------------------------------------------ internals
 
-    def _context_for(self, instruction: Instruction, context: Path) -> Path:
-        """Apply the instruction's own `in X,` prefix to the inherited context."""
+    def _context_for(self, instruction: Instruction, context: Path) -> Path | None:
+        """Apply the instruction's own `in X,` prefix to the inherited context.
+
+        None where the instruction states a scope that cannot be read. Carrying on in
+        the inherited context instead put "In Article 27(3), the second subparagraph is
+        replaced" at the act's Article 1, second subparagraph — resolved, unflagged and
+        wrong, in six of twenty disagreements sampled from the corpus.
+        """
         steps = parse_phrase(instruction.scope_text)
         if not steps:
             if instruction.scope_text:
                 instruction.note(
                     f"scope {instruction.scope_text!r} could not be parsed"
                 )
+                return None
             return context
         if _is_redundant(context, steps):
             instruction.note(
@@ -309,6 +371,27 @@ class Resolver:
         if steps[0].kind is Kind.ARTICLE:
             return Path(tuple(steps))
         return Path(context.steps + tuple(steps))
+
+    def _refuse(self, instruction: Instruction, scoped: Path | None,
+                reason: str) -> list[Resolution]:
+        """Unresolved results for an instruction and everything inside it.
+
+        What it contains was addressed relative to something that could not be read;
+        resolving those against a guess would be worse than saying so. Where there is a
+        provision to report at, the first result carries it, so the comment lands there.
+        """
+        first = (self._check(instruction, scoped) if scoped is not None
+                 else Resolution(instruction))
+        first.status, first.reason, first.unread = "unresolved", reason, True
+        results = [first]
+        for child in instruction.children:
+            for inner in child.walk():
+                results.append(Resolution(
+                    inner, path=scoped, node=first.node, status="unresolved",
+                    unread=True,
+                    reason=f"inside instruction {instruction.id}: {reason}",
+                ))
+        return results
 
     def _visit(self, instruction: Instruction, context: Path,
                report: ResolutionReport) -> None:
@@ -321,27 +404,20 @@ class Resolver:
 
         scoped = self._context_for(instruction, context)
 
+        if scoped is None:
+            report.results.extend(self._refuse(
+                instruction, None,
+                f"scope {instruction.scope_text!r} could not be read, so there is no "
+                f"provision to look in"))
+            return
+
         if instruction.op is Op.UNKNOWN:
             # No rule read the operation, so there is no target either, and the walk
             # below would land on the enclosing provision and call that resolved.
             # It is not: nothing will be applied, and coverage has to say so. The
             # enclosing provision is kept as the place to report it.
-            result = self._check(instruction, scoped)
-            result.status = "unresolved"
-            result.reason = "no rule matched this instruction"
-            result.unread = True
-            report.results.append(result)
-            # Whatever it was meant to contain was addressed relative to a target
-            # nobody read; resolving those against a guess would be worse than
-            # saying so.
-            for child in instruction.children:
-                for inner in child.walk():
-                    report.results.append(Resolution(
-                        inner, path=scoped, node=result.node, status="unresolved",
-                        unread=True,
-                        reason=f"inside instruction {instruction.id}, "
-                               f"which no rule matched",
-                    ))
+            report.results.extend(self._refuse(
+                instruction, scoped, "no rule matched this instruction"))
             return
 
         # "paragraphs 8 and 8a are deleted" — several targets. Without this the
