@@ -38,7 +38,8 @@ ARTICLE_NUMBER = re.compile(r"^Article\s+(?P<key>[0-9]+[a-z]*(?:\s*\([^)]*\))?)\
 POINT_MARKER = re.compile(r"^\(?(?P<key>[a-z]{1,3}|[ivx]{1,5}|\d{1,2})\)?\.?$", re.I)
 # Keys include hyphenated forms: the ETS Directive has Article 12(3-a)..(3-e).
 PARAGRAPH_KEY = re.compile(r"^(?P<key>\d+(?:-?[a-z]+)?)\.?$", re.I)
-CHAPTER_NUMBER = re.compile(r"^CHAPTER\s+(?P<key>[IVXLC]+[a-z]?)\s*$", re.I)
+# Directive 2013/34/EU numbers its chapters "CHAPTER 8" — an amending act calls it "Chapter 8".
+CHAPTER_NUMBER = re.compile(r"^CHAPTER\s+(?P<key>(?:[IVXLC]+|\d+)[a-z]?)\s*$", re.I)
 
 # Consolidation markers: "►M9 system ◄" means M9 inserted "system".
 # Strip the marker glyphs, keep the text they wrap.

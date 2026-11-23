@@ -796,3 +796,26 @@ def test_introductory_words_with_no_provision_named_are_unresolved():
         "the introductory phrase is replaced by the following:", _act_with_introductions())
     assert result.status == "unresolved"
     assert "names no provision" in result.reason
+
+
+def test_a_point_inside_a_point_is_found_as_the_sub_point_the_tree_calls_it():
+    """"in Article 22(3), point (g), point (i)" — Regulation 2021/1060 and others."""
+    instruction, result = _resolve_one(
+        "in Article 2(1), point (b), point (ii) is replaced by the following:",
+        _act_with_introductions())
+    assert result.status == "resolved"
+    assert result.node.kind is Kind.SUBPOINT
+    assert result.node.key == "ii"
+
+
+def test_a_chapter_numbered_in_arabic_digits_is_addressable():
+    from a2t.model.assemble import assemble
+
+    act = assemble('<html><body><p class="title-division-1">CHAPTER 8</p>'
+                   '<p class="title-division-2">Audit</p>'
+                   '<p class="title-article-norm">Article 34</p>'
+                   '<p class="norm">Text.</p></body></html>', "TEST", "t")
+    assert [c.key for c in act.root.of_kind(Kind.CHAPTER)] == ["8"]
+    instruction, result = _resolve_one(
+        "the title of Chapter 8 is replaced by the following:", act)
+    assert result.status == "resolved"

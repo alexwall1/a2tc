@@ -110,6 +110,11 @@ def resolve(path: Path, root: Act | Node, notes: list[str] | None = None) -> Nod
             continue
         if step.key is not None:
             found = node.by_key(step.kind, step.key)
+            if found is None and step.kind is Kind.POINT and node.kind in (
+                    Kind.POINT, Kind.SUBPOINT):
+                # "in point (g), point (i)": the act's own words call every level of a
+                # list a point; the tree calls the second level a sub-point.
+                found = node.by_key(Kind.SUBPOINT, step.key)
             if (found is None and notes is not None and node.kind is Kind.SUBPARAGRAPH
                     and not node.of_kind(step.kind) and node.parent is not None):
                 found = node.parent.by_key(step.kind, step.key)
