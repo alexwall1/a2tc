@@ -145,6 +145,14 @@ ORDINAL_RUN = re.compile(r"^(?:the\s+)?(?P<ordinals>[a-z, -]+?)\s+(?P<noun>[a-z]
 
 def _why_unread(raw: str) -> str:
     """Why nothing read an instruction, where the reason is one worth naming."""
+    if re.search(r"\b(?:become|becomes|renumbered|redesignated|moved)\b", raw, re.I):
+        return ("renumbering and moving provisions is not supported: the act's "
+                "numbering after this point may no longer match the proposal")
+    if re.search(r"\b(?:repealed|omitted)\b", raw, re.I):
+        return ("'repealed' is not read as a deletion: the proposal's own words "
+                "are kept and nothing is removed")
+    if re.search(r"\bsubstituted\b", raw, re.I):
+        return "'substituted' is not read as a replacement; no text was changed"
     # What is missing from the tree is the more basic reason, so it is named first.
     if re.search(r"\bthe\s+following\s+(?:title|section|subsection)s?\b", raw, re.I):
         return "the tree has no title, section or subsection to insert"

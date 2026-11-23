@@ -41,7 +41,19 @@ OPERATION = re.compile(
     r"|\bamended\s+as\s+(?:follows|set\s+out)\b"
     r"|\bshall\s+be\s+(?:replaced|deleted|inserted)\b"
     # The auxiliary is sometimes dropped: "paragraph 7 replaced by the following".
-    r"|\b(?:replaced|inserted|added)\s+by\s+the\s+following\b",
+    r"|\b(?:replaced|inserted|added)\s+by\s+the\s+following\b"
+    # Operations the tool cannot apply but must still see. Left out of this list they
+    # were not instructions at all: the line was read as a continuation of the payload
+    # above it, and — for an instruction that happened to follow a quoted payload — as
+    # the law that payload enacts. "Article 5 is repealed;" and "paragraphs 2 and 3
+    # become paragraphs 3 and 4;" both vanished that way, and took the instruction
+    # after them along.
+    r"|\b(?:is|are|shall\s+be)\s+(?:hereby\s+)?"
+    r"(?:repealed|renumbered|moved|substituted|redesignated|omitted)\b"
+    r"|\b(?:become|becomes)\s+(?:the\s+)?(?:new\s+)?"
+    r"(?:Articles?|paragraphs?|points?|subparagraphs?|sentences?)\b"
+    # "Article 6 shall read as follows:" is a replacement worded another way.
+    r"|\b(?:shall\s+read|reads)\s+as\s+follows\b",
     re.I,
 )
 

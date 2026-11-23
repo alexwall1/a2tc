@@ -594,3 +594,16 @@ def test_an_annex_by_reference_leaves_the_applicable_count():
         "Annex V is amended in accordance with Annex III to this Regulation.",
         _act_with_two_articles())
     assert result.status == "not-applicable"
+
+
+@pytest.mark.parametrize("raw, said", [
+    ("paragraphs 2 and 3 of Article 27 become paragraphs 3 and 4;", "renumbering"),
+    ("Article 27 is renumbered as Article 27a;", "renumbering"),
+    ("Article 27 is repealed;", "not read as a deletion"),
+    ("in Article 27, the word ‘old’ is substituted by the word ‘new’;", "substituted"),
+])
+def test_an_unsupported_operation_is_refused_with_its_own_reason(raw, said):
+    instruction, result = _resolve_one(raw, _act_with_two_articles())
+    assert instruction.op is Op.UNKNOWN
+    assert result.status == "unresolved"
+    assert said in result.reason

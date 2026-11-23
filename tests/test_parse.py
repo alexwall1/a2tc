@@ -483,3 +483,62 @@ def test_replaced_by_the_words_is_a_text_replacement():
     assert instruction.op is Op.REPLACE_TEXT
     assert (instruction.find_text, instruction.replace_text) == (
         "Articles 7 to 11", "Articles 7 to 11a")
+
+
+# --------------------------- verbs the segmenter used to pass over without a word
+
+
+def _segment_lines(*texts):
+    from a2t.extract.pdf import Line
+
+    operative = [Line(t, 1, i + 1) for i, t in enumerate(texts)]
+    blocks = segment(operative, detect_targets(operative).targets)
+    classify_all(blocks)
+    return blocks
+
+
+AMENDING_ARTICLE = [
+    "Article 1",
+    "Directive 2003/87/EC is amended as follows:",
+    "(1) in Article 3, point (h) is replaced by the following:",
+    "‘(h) ‘new entrant’ means any installation;’;",
+    "{middle}",
+    "(3) Article 11 is deleted.",
+    "Article 2",
+    "This Directive shall enter into force on the twentieth day.",
+]
+
+
+@pytest.mark.parametrize(
+    "middle, verb_said",
+    [
+        ("(2) Article 5 is repealed;", "repeal"),
+        ("(2) paragraphs 2 and 3 of Article 9 become paragraphs 3 and 4;", "renumber"),
+        ("(2) Article 7 is renumbered as Article 7a;", "renumber"),
+        ("(2) Article 8 is moved after Article 10;", "mov"),
+        ("(2) in Article 4, the word ‘old’ is substituted by the word ‘new’;", "substitut"),
+    ],
+)
+def test_an_unsupported_operation_is_kept_as_an_instruction_not_dropped(middle, verb_said):
+    lines = [t.format(middle=middle) for t in AMENDING_ARTICLE]
+    (block,) = _segment_lines(*lines)
+    instructions = {i.marker: i for i in block.walk()}
+
+    # The line before and the line after it both survive, and the line itself is there.
+    assert set(instructions) >= {"1", "2", "3"}
+    assert instructions["2"].raw.startswith(middle[4:20])
+    assert instructions["2"].op is Op.UNKNOWN
+    assert instructions["3"].op is Op.DELETE_NODE
+    # It must not have been read as part of the payload above it.
+    assert "repealed" not in (instructions["1"].payload or "")
+    assert "become" not in (instructions["1"].payload or "")
+
+
+def test_shall_read_as_follows_is_a_replacement():
+    lines = [t.format(middle="(2) Article 6 shall read as follows:") for t in AMENDING_ARTICLE]
+    lines.insert(5, "‘Article 6 Text of the article.’")
+    (block,) = _segment_lines(*lines)
+    instruction = next(i for i in block.walk() if i.marker == "2")
+    assert instruction.op is Op.REPLACE_NODE
+    assert instruction.target_text == "Article 6"
+    assert "Text of the article." in instruction.payload

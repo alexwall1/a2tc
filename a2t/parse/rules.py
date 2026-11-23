@@ -90,7 +90,9 @@ REPLACE_NODE = re.compile(
     # The auxiliary verb is occasionally omitted in the source; "by the following"
     # keeps the reading unambiguous. See Directive (EU) 2023/959, Art. 2(1)(d).
     # "is replaced as follows:" is the same instruction.
-    r"^(?P<target>.+?)\s+(?:(?:is|are|shall\s+be)\s+)?replaced\s+(?:by\s+the\s+following|as\s+follows)",
+    r"^(?P<target>.+?)\s+(?:(?:is|are|shall\s+be)\s+)?replaced\s+(?:by\s+the\s+following|as\s+follows)"
+    # "Article 6 shall read as follows:" — the same replacement.
+    r"|^(?P<target_reads>.+?)\s+(?:shall\s+read|reads)\s+as\s+follows",
     re.I,
 )
 DELETE_NODE = re.compile(r"^(?P<target>.+?)\s+(?:is|are|shall\s+be)\s+deleted", re.I)
@@ -193,7 +195,8 @@ def classify(instruction: Instruction) -> Instruction:
     match = REPLACE_NODE.match(body)
     if match:
         instruction.op = Op.REPLACE_NODE
-        instruction.target_text = match.group("target").strip()
+        instruction.target_text = (match.group("target")
+                                   or match.group("target_reads")).strip()
         return instruction
 
     match = DELETE_NODE.match(body)
