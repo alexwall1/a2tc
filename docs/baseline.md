@@ -145,3 +145,38 @@ Still undetected (9), by reading the first lines of each: an omnibus act amendin
 operative parts the isolator does not bound; a sentence whose verb wraps onto the second
 line (32009R1073: "the following para-graph shall be inserted"); and decisions whose
 amendment is worded in the recital.
+
+## After reading compact citations, refusing unreadable scopes and fixing the comparator
+
+Rerun at `e42032c`, all 87 documents.
+
+| | Previous run | This run |
+|---|---|---|
+| Resolved | 1260 of 1526 (82.6%) | 1329 of 1547 (85.9%) |
+| Agreement with the published consolidation | 290 of 410 (70.7%) | 364 of 429 (84.8%) |
+| Instructions refused because their scope cannot be read | not counted | 31 |
+
+The agreement rise has two causes and they are not the same kind of improvement. Scoring
+the same 429 compared changes with both comparators:
+
+| Comparator | Agreeing |
+|---|---|
+| The one used before this commit | 308 of 429 (71.8%) |
+| The one used now | 364 of 429 (84.8%) |
+
+So about one point of the rise is conversion: 19 more changes can be compared and 18 more
+of them agree under the old measure, because "In Article 27(3), …" now lands on Article
+27(3). The other thirteen points are the measure no longer counting presentation as
+error: a paragraph number or note marker in the payload, "CO2" against "CO 2", hyphen
+variants, an article heading the consolidation keeps apart, and a replacement that the
+consolidation prints as several sibling provisions.
+
+Why resolved rose when the plan expected it to fall: refusing an unreadable scope removes
+the wrong placements (they were counted as resolved), but reading compact citations
+resolved more instructions than were refused.
+
+Before the change, six of twenty sampled disagreements were placements on the wrong
+provision — the base act's Article 1, second subparagraph — with no flag. They are now
+placed correctly where the citation is compact, and refused with a stated reason where
+the scope is still unreadable. The 31 refusals are the next list to read: each is a
+scope wording the parser does not know.
