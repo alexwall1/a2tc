@@ -53,6 +53,11 @@ ORDINAL = re.compile(
     re.I,
 )
 
+# "the introductory phrase is replaced by the following:" — the words that lead into a
+# list of points, which the tree keeps as the text of the provision holding them.
+INTRODUCTION = re.compile(
+    r"^(?:the\s+)?introductory\s+(?:wording|words|phrase|sentence|part|text)$", re.I)
+
 ORDINAL_LIST = re.compile(r"^(?:the\s+)?(?P<noun>[a-z]+)\s+(?P<keys>.+)$", re.I)
 
 
@@ -143,6 +148,25 @@ BARE_KEY = re.compile(
 # listed by, so the ordinals come first and the noun closes the phrase.
 ORDINAL_RUN = re.compile(r"^(?:the\s+)?(?P<ordinals>[a-z, -]+?)\s+(?P<noun>[a-z]+s)$",
                          re.I)
+
+
+def _introduction_holder(node: Node) -> Node | None:
+    """The node whose own text leads into a list of points within or after `node`.
+
+    The first words of the provision, provided points follow them: either below it (a
+    point with sub-points), or beside it, after it (an unnumbered subparagraph that
+    introduces the points of its paragraph, which the tree keeps as its siblings).
+    """
+    holders = [n for n in node.walk() if n.text]
+    if not holders:
+        return None
+    first = holders[0]
+    below = any(n.kind in (Kind.POINT, Kind.SUBPOINT)
+                for n in node.walk() if n is not first)
+    siblings = first.parent.children if first.parent is not None else []
+    after = (siblings[siblings.index(first) + 1:] if first in siblings else [])
+    beside = any(n.kind in (Kind.POINT, Kind.SUBPOINT) for n in after)
+    return first if below or beside else None
 
 
 def _why_unread(raw: str) -> str:
@@ -548,6 +572,11 @@ class Resolver:
             report.results.append(result)
             return
 
+        if (instruction.op is Op.REPLACE_NODE and instruction.target_text
+                and INTRODUCTION.match(instruction.target_text.strip())):
+            report.results.append(self._resolve_introduction(instruction, scoped))
+            return
+
         if instruction.target_text and OWN_TITLE.match(instruction.target_text.strip()):
             node = resolve(scoped, self.act) if scoped.steps else self.act.root
             report.results.append(
@@ -614,6 +643,35 @@ class Resolver:
             )
         result.instruction.confidence = min(result.instruction.confidence, 0.5)
         result.instruction.note(result.doubt)
+
+    def _resolve_introduction(self, instruction: Instruction, scoped: Path) -> Resolution:
+        """The words leading into a list, as the text to replace.
+
+        They are a provision's own text, not a provision, so the target is a virtual
+        sentence of the node holding them — the same device `path._resolve_sentence`
+        uses — and replacing it rewrites that text inside its holder and leaves the
+        points and sub-points below it exactly as they are. Replacing the holder itself
+        would replace its whole subtree.
+        """
+        if not scoped.steps:
+            return Resolution(
+                instruction, path=scoped, status="unresolved",
+                reason="the introductory words of what? the instruction names no provision")
+        node = resolve(scoped, self.act)
+        if node is None:
+            return Resolution(instruction, path=scoped, status="unresolved",
+                              reason=f"{scoped} does not exist in {self.act.celex}")
+        holder = _introduction_holder(node)
+        if holder is None:
+            return Resolution(
+                instruction, path=scoped, node=node, status="unresolved",
+                reason=f"{node.citation} has no list of points, so its introductory "
+                       f"words cannot be told from the rest of its text")
+        words = Node(Kind.SENTENCE, index=1, text=holder.text)
+        words.parent = holder
+        instruction.note("introductory words read as the text before the list of points "
+                         f"in {holder.citation}")
+        return Resolution(instruction, path=scoped, node=words, status="resolved")
 
     def _run_members(self, context: Path, step: Step) -> list[Step] | None:
         """The provisions "paragraphs 12 to 18" names: every sibling from one to the other.

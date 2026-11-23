@@ -726,3 +726,73 @@ def test_a_single_provision_is_still_not_an_enumeration():
 
     assert parse_enumeration("paragraph 3") is None
     assert parse_enumeration("paragraphs 12 to 18") is not None
+
+
+# ------------------------------------------------------------------ introductory words
+
+
+def _act_with_introductions():
+    from a2t.model.tree import Act, Node
+
+    act = Act(celex="TEST", title="t")
+    article = act.root.add(Node(Kind.ARTICLE, key="2"))
+    paragraph = article.add(Node(Kind.PARAGRAPH, key="1"))
+    paragraph.add(Node(Kind.SUBPARAGRAPH, text="Member States shall ensure that:"))
+    paragraph.add(Node(Kind.POINT, key="a", text="waste is collected;"))
+    point = paragraph.add(Node(Kind.POINT, key="b", text="waste is treated, where:"))
+    point.add(Node(Kind.SUBPOINT, key="i", text="it is hazardous;"))
+    point.add(Node(Kind.SUBPOINT, key="ii", text="it is mixed."))
+    plain = article.add(Node(Kind.PARAGRAPH, key="2"))
+    plain.add(Node(Kind.SUBPARAGRAPH, text="A paragraph with no list at all."))
+    return act
+
+
+def test_the_introductory_words_of_a_paragraph_are_its_text_before_the_points():
+    instruction, result = _resolve_one(
+        "in Article 2(1), the introductory phrase is replaced by the following:",
+        _act_with_introductions())
+    assert result.status == "resolved"
+    assert result.node.text == "Member States shall ensure that:"
+    assert result.node.parent.kind is Kind.SUBPARAGRAPH
+    assert any("introductory words" in n for n in instruction.notes)
+
+
+def test_the_introductory_words_of_a_point_leave_its_sub_points_alone():
+    instruction, result = _resolve_one(
+        "in Article 2(1), point (b), the introductory wording is replaced by the following:",
+        _act_with_introductions())
+    assert result.status == "resolved"
+    assert result.node.text == "waste is treated, where:"
+    assert result.node.parent.kind is Kind.POINT
+
+
+def test_introductory_words_replaced_by_the_following_change_only_that_text():
+    from a2t.apply.changeset import ChangeKind, build_changes
+
+    act = _act_with_introductions()
+    instruction, result = _resolve_one(
+        "in Article 2(1), point (b), the introductory wording is replaced by the following:",
+        act)
+    instruction.payload = "waste is recovered, where:"
+    (change,) = build_changes(result)
+    assert change.kind is ChangeKind.TEXT_EDIT
+    assert change.node.kind is Kind.POINT          # the change lives on the holder
+    assert change.old_text == "waste is treated, where:"
+    assert change.new_text == "waste is recovered, where:"
+    # The sub-points are not part of it.
+    assert "hazardous" not in change.old_text
+
+
+def test_a_provision_with_no_list_has_no_introductory_words_to_replace():
+    instruction, result = _resolve_one(
+        "in Article 2(2), the introductory phrase is replaced by the following:",
+        _act_with_introductions())
+    assert result.status == "unresolved"
+    assert "no list of points" in result.reason
+
+
+def test_introductory_words_with_no_provision_named_are_unresolved():
+    instruction, result = _resolve_one(
+        "the introductory phrase is replaced by the following:", _act_with_introductions())
+    assert result.status == "unresolved"
+    assert "names no provision" in result.reason
