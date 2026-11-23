@@ -103,6 +103,15 @@ class EurlexBuilderProvider:
             raise RetrievalError(f"no document retrieved for {celex}")
 
         row = works.row(0, named=True)
+        language = row.get("language")
+        if language and language != "eng":
+            # The library takes whichever language Cellar has when there is no English
+            # one, and says so only in this column. Ten acts in the cache were German,
+            # Italian, Dutch, French or Spanish: their "Artikel 1" matches no article
+            # pattern, so instructions were looked for in the wrong act, or none was
+            # assembled at all. `acquire` treats this as a missing consolidation.
+            raise RetrievalError(
+                f"{celex} has no English text (Cellar supplied {language!r})")
         html = row.get("full_text_html") or ""
         if not html.strip():
             raise RetrievalError(

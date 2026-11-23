@@ -324,3 +324,44 @@ def test_no_consolidation_by_the_date_and_no_act_as_adopted_says_both(monkeypatc
 
     assert "32009R0080" in str(excinfo.value)
     assert "2025-03-01" in str(excinfo.value)
+
+
+def _write_works(directory, language, source):
+    import polars as pl
+
+    directory.mkdir(parents=True)
+    pl.DataFrame({"celex_id": ["02012L0029-20121115"], "title": ["Richtlijn 2012/29/EU"],
+                  "full_text_html": ["<p class='title-article-norm'>Artikel 1</p>"],
+                  "language": [language], "content_source": [source]}
+                 ).write_parquet(directory / "works.parquet")
+
+
+def test_text_in_another_language_is_not_taken_for_the_act(tmp_path):
+    """The library fills in whatever language Cellar has when there is no English one."""
+    from a2t.retrieval.eurlex_builder import EurlexBuilderProvider
+
+    provider = EurlexBuilderProvider(cache_dir=tmp_path)
+    target = provider._dir_for("02012L0029-20121115")
+    _write_works(target, "nld", "cellar_html_nld")
+
+    with pytest.raises(RetrievalError, match="no English text"):
+        provider._load("02012L0029-20121115", target)
+
+
+def test_english_text_is_loaded(tmp_path):
+    from a2t.retrieval.eurlex_builder import EurlexBuilderProvider
+
+    provider = EurlexBuilderProvider(cache_dir=tmp_path)
+    target = provider._dir_for("02012L0029-20121115")
+    _write_works(target, "eng", "cellar_html_eng")
+
+    assert provider._load("02012L0029-20121115", target).celex == "02012L0029-20121115"
+
+
+def test_a_pre_2000_title_with_the_number_first_confirms_the_act():
+    from a2t.detect.celex import parse_citation
+    from a2t.retrieval.base import title_matches
+
+    citation = parse_citation("Regulation (EC) 1257/96")
+    assert title_matches(citation, "Council Regulation (EC) No 1257/96 of 20 June 1996 "
+                                   "concerning humanitarian aid")

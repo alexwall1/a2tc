@@ -57,4 +57,6 @@ def title_matches(citation: Citation, title: str) -> bool:
         # Pre-2000 acts are cited with a two-digit year, and that is how their own
         # titles read: "Council Directive 92/106/EEC", never "1992/106".
         forms.append(rf"\b{citation.year % 100:02d}/{citation.number}\b")
+        # …and a number-first citation does the same: "No 1257/96", "No 2913/92".
+        forms.append(rf"\b{citation.number}/{citation.year % 100:02d}\b")
     return any(re.search(form, normalised) for form in forms)
