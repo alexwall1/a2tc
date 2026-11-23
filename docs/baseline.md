@@ -231,3 +231,46 @@ against the same retrieved base acts.
   of the document, after the final article, because "In Article 9(1)" could not be read
   and the insertion fell back to the act root. They now follow point (k) of Article 9(1).
   The other act's document is identical.
+
+## After keeping unsupported operations visible, and the small guarantee fixes
+
+Rerun at `6a75e07`, all 87 documents.
+
+| | Previous run | This run |
+|---|---|---|
+| Resolved | 1334 of 1490 (89.5%) | 1340 of 1496 (89.6%) |
+| Agreement with the published consolidation | 372 of 437 (85.1%) | 372 of 437 (85.1%) |
+| Unclassified instructions | 28 | 8 |
+| Blocks (one per act and scope) | 142 | 138 |
+
+What these changes were for is not in the percentages:
+
+- An instruction using a verb the segmenter did not know — "is repealed", "become
+  paragraphs 3 and 4", "is renumbered", "is moved", "is substituted" — used to be read as
+  a continuation of the payload above it, and vanished. Each is now an instruction that is
+  reported as unresolved with its own reason ("renumbering and moving provisions is not
+  supported", "'repealed' is not read as a deletion"). "Article 6 shall read as follows:"
+  is read as a replacement. None of these occurs in the 87-document corpus on an
+  instruction line, which is why the figures do not move; a synthetic document
+  reproduced the loss, and it took the following instruction with it.
+- An act nothing was consolidated for by the proposal date, but which has later
+  consolidations, now falls back to the act as adopted (it raised before). Two corpus acts
+  were in this position.
+- An act amended in two articles of one proposal is one block, so one document; the four
+  fewer blocks are such cases. Blocks that amend different scopes of an act stay apart,
+  and their documents no longer share a file name.
+- `report.md` lists the proposal's own articles (transposition, entry into force) as not
+  converted. `convert` exits non-zero if any act was not converted. `diff` and `llm-eval`
+  report a missing PDF, date or act as an error, and `retrieve` uses the same acquisition
+  and fallbacks as `convert`.
+- Both sample proposals produce identical Word documents.
+
+### What titles, sections and annexes would unlock, from this run
+
+| | Instructions | Documents |
+|---|---|---|
+| Inside or by reference to an annex | about 55 | 15 amend annexes only |
+| Titles, sections, subsections, "introductory wording" | about 24 | 5 acts did not retrieve (Directive 2006/112/EC, which inserts titles and sections) |
+
+Most of the title and section instructions come from one act family, the VAT Directive.
+Annex instructions are spread over many acts. Neither appears in the two sample proposals.
