@@ -10,8 +10,10 @@ same corpus.
 act that amended it, and the consolidation that followed. They are every usable triple
 `a2t corpus triples` finds for 18 base acts chosen to spread across policy areas
 (emissions trading, transport, energy, waste, accounting, financial markets, VAT,
-medical devices, consumer rights, data protection). 12 of the 83 amending acts could
-not be downloaded, so 74 documents were run.
+medical devices, consumer rights, data protection). In this first run 12 of the 83
+amending acts could not be downloaded, so 74 documents were run; EUR-Lex's PDF address
+failed for them intermittently and answered on later requests, so every later run below
+covers all 87.
 
 ```bash
 a2t corpus fetch $(cut -f3 docs/baseline-triples.tsv | sort -u)
@@ -376,8 +378,9 @@ Adopted-act corpus after the language fix: 1470 of 1546 resolved (95.1%) with 13
 acts converted (from 121), agreement unchanged at 427 of 500.
 
 EUR-Lex's PDF address returns an empty HTML page for some documents that exist, which is
-why 12 corpus documents never downloaded; `corpus fetch` now falls back to the Publications
-Office's own resolver, which serves them.
+why 12 corpus documents failed to download in the first run (they came through on later
+requests). `corpus fetch` now falls back to the Publications Office's own resolver when
+that happens, so a failed download no longer depends on trying again.
 
 Still unread among the 30: three annex-only proposals (reported as such) and one decision
 that adjusts amounts without an amending sentence.

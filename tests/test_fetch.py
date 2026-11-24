@@ -75,3 +75,34 @@ def test_an_implausibly_small_pdf_is_refused(monkeypatch, tmp_path):
     serve(monkeypatch, {"https://eur-lex": Response(body=b"%PDF-1.7 tiny")})
     with pytest.raises(FetchError, match="implausibly small"):
         Fetcher(tmp_path, delay=0).fetch("32008L0101")
+
+
+def test_a_202_from_eurlex_is_asked_again_before_falling_back(monkeypatch, tmp_path):
+    """EUR-Lex answers 202 with an empty page while it prepares the PDF."""
+    answers = [Response(202, "text/html; charset=UTF-8", b""),
+               Response(202, "text/html; charset=UTF-8", b""), Response()]
+    asked = []
+
+    def get(url, headers=None, timeout=None):
+        asked.append(url)
+        return answers.pop(0)
+
+    monkeypatch.setattr(fetch_module.requests, "get", get)
+    monkeypatch.setattr(fetch_module.time, "sleep", lambda s: None)
+
+    path = Fetcher(tmp_path, delay=0).fetch("32014R1357")
+    assert path.read_bytes() == PDF
+    assert len(asked) == 3
+    assert all(url.startswith("https://eur-lex") for url in asked)  # Cellar never asked
+
+
+def test_a_document_eurlex_never_serves_goes_to_cellar_after_the_retries(
+        monkeypatch, tmp_path):
+    asked = serve(monkeypatch, {
+        "https://eur-lex": Response(202, "text/html", b""),
+        "https://publications.europa.eu/resource/celex/": Response(404, "text/html", b"")})
+    monkeypatch.setattr(fetch_module.time, "sleep", lambda s: None)
+
+    with pytest.raises(FetchError, match="404"):
+        Fetcher(tmp_path, delay=0, retries=2).fetch("32014R1357")
+    assert sum(1 for url in asked if url.startswith("https://eur-lex")) == 3  # 1 + 2 retries

@@ -32,11 +32,12 @@ def pdf_url(celex: str) -> str:
 
 class Fetcher:
     def __init__(self, cache_dir: Path | str = Path("out/corpus/pdf"),
-                 delay: float = DEFAULT_DELAY, timeout: int = 120):
+                 delay: float = DEFAULT_DELAY, timeout: int = 120, retries: int = 3):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.delay = delay
         self.timeout = timeout
+        self.retries = retries
         self._last_request = 0.0
 
     def path_for(self, celex: str) -> Path:
@@ -56,13 +57,21 @@ class Fetcher:
             time.sleep(self.delay - elapsed)
 
         try:
-            response = self._get(pdf_url(celex), {})
+            response = self._eurlex(celex)
             if not self._is_pdf(response):
                 # EUR-Lex's PDF address answers some documents with an empty HTML page
                 # ("may not exist in EN") though they exist. The Publications Office's
                 # own resolver serves them: it answers a bare CELEX with a list of the
                 # manifestations, the first of which is the document itself.
-                response = self._from_cellar(celex)
+                refused = response.status_code
+                try:
+                    response = self._from_cellar(celex)
+                except FetchError:
+                    raise
+                except Exception as exc:
+                    raise FetchError(
+                        f"{celex}: EUR-Lex answered {refused} with no PDF, and the "
+                        f"Publications Office could not supply it either: {exc}") from exc
         except FetchError:
             raise
         except Exception as exc:
@@ -80,6 +89,22 @@ class Fetcher:
 
         path.write_bytes(response.content)
         return path
+
+    def _eurlex(self, celex: str):
+        """EUR-Lex's PDF address, asked again while it says "not yet".
+
+        It answers HTTP 202 with an empty HTML page while it prepares the document, and
+        the PDF on a later request — which is why 12 corpus documents failed on the first
+        run and came through on the next. A few spaced retries settle most of them; the
+        rest go to Cellar.
+        """
+        response = self._get(pdf_url(celex), {})
+        for _ in range(self.retries):
+            if self._is_pdf(response) or response.status_code != 202:
+                break
+            time.sleep(self.delay * 2)
+            response = self._get(pdf_url(celex), {})
+        return response
 
     def _get(self, url: str, headers: dict):
         response = requests.get(
