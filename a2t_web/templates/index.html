@@ -2,7 +2,8 @@
 {% block title %}Upload a proposal — A2T Web{% endblock %}
 {% block content %}
   <h1>A2T Web</h1>
-  <p>Upload an EU Commission proposal (a COM document, PDF) to convert it into
+  <p>Upload an EU Commission proposal (a COM document, PDF) — or give a link to
+  it, or to an adopted amending act, on EUR-Lex — to convert it into
   tracked-changes Word documents. The conversion runs in the background; you
   are taken to a status page you can keep open.</p>
   {% if error %}
@@ -11,13 +12,20 @@
   <form id="upload-form" method="post" action="{{ url_for('upload') }}"
         enctype="multipart/form-data" data-max-bytes="{{ max_upload_bytes }}">
     <label for="pdf">Proposal PDF</label>
-    <input type="file" id="pdf" name="pdf" accept=".pdf" required>
+    <input type="file" id="pdf" name="pdf" accept=".pdf">
+    <p class="hint">or</p>
+    <label for="url">EUR-Lex link</label>
+    <input type="text" id="url" name="url" inputmode="url" autocomplete="off"
+           placeholder="https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52023PC0702">
+    <p class="hint">A link to the document's page on EUR-Lex, or just its CELEX number
+    (for example 52023PC0702). Only the document number is read from the link; the
+    PDF is then fetched from EUR-Lex.</p>
     <button type="submit">Convert</button>
   </form>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
-      wireUploadForm("upload-form", "pdf");
+      wireUploadForm("upload-form", "pdf", "url");
     });
   </script>
 {% endblock %}

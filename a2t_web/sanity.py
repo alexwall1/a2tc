@@ -39,6 +39,11 @@ def sanity_check(pdf_path: Path) -> Detection:
     except (ExtractionError, ValueError) as exc:
         raise SanityError(NOT_A_PDF_PREFIX + str(exc)) from exc
     if not detection.targets:
+        if detection.annexes:
+            # A reason the document is not convertible that the reader can act on.
+            raise SanityError(
+                "This document amends only annexes of "
+                f"{', '.join(detection.annexes)}; annexes are out of scope.")
         raise SanityError(NOT_AN_AMENDMENT)
     if find_proposal_date(lines) is None:
         raise SanityError(NO_PROPOSAL_DATE)

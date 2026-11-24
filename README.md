@@ -57,6 +57,15 @@ status page that polls the JSON API (no long-lived connections). It binds to
 Then open <http://127.0.0.1:5000>, upload a proposal, and keep the status page
 open until the tracked-changes documents and `report.md` are ready to download.
 
+- Instead of a PDF you can enter a link to the document on EUR-Lex — a proposal
+  (`.../legal-content/EN/TXT/?uri=CELEX:52023PC0702`, or `uri=COM:2023:702:FIN`) or an
+  adopted amending act (the same form, or `eur-lex.europa.eu/eli/dir/2023/959/oj`) — or
+  just its CELEX number. Only the document number is read from the link, and only links
+  to `eur-lex.europa.eu`, `publications.europa.eu` and `data.europa.eu` are accepted; the
+  PDF is then fetched from EUR-Lex itself (falling back to the Publications Office when
+  EUR-Lex answers "not ready") and goes through the same checks as an upload. A
+  consolidated text (CELEX `0…`) is refused: it is what amendments apply to, not an
+  amendment. Fetched PDFs are kept in `<data dir>/fetched/`.
 - Uploads, results, and the SQLite database (`a2t.db`) live in `./webapp-data`
   by default; `A2T_WEB_DATA_DIR` overrides the location.
 - The web app runs the pipeline with the LLM tier (`--llm`) enabled, so an

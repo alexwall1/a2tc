@@ -813,3 +813,112 @@ def test_main_exits_cleanly_on_broken_db(monkeypatch, tmp_path, capsys):
         app_module.main()
     assert excinfo.value.code == 1
     assert "database" in capsys.readouterr().err
+
+# -------------------------------------------------- a EUR-Lex link instead of a file
+
+
+@pytest.fixture
+def fetched(monkeypatch):
+    """Replace the network fetch; records the CELEX numbers asked for."""
+    from a2t_web import source
+
+    asked = []
+
+    def fetch_pdf(celex, destination, data_dir):
+        asked.append(celex)
+        destination.write_bytes(PDF_BYTES)
+
+    monkeypatch.setattr(source, "fetch_pdf", fetch_pdf)
+    return asked
+
+
+LINK = "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:52023PC0702"
+
+
+def test_index_page_offers_a_eurlex_link_as_well(client):
+    rv = client.get("/")
+    assert b'name="url"' in rv.data
+    assert b'name="pdf"' in rv.data
+
+
+def test_a_link_creates_a_job_from_the_fetched_document(client, fetched, tmp_path):
+    rv = client.post("/jobs", data={"url": LINK})
+    assert rv.status_code == 303
+    job_id = rv.headers["Location"].rsplit("/", 1)[-1]
+
+    assert fetched == ["52023PC0702"]
+    assert (tmp_path / "uploads" / f"{job_id}.pdf").read_bytes() == PDF_BYTES
+    snapshot = client.get(f"/api/jobs/{job_id}").get_json()
+    assert snapshot["status"] == QUEUED
+    assert snapshot["pdf_name"] == "52023PC0702.pdf"
+
+
+def test_a_bare_celex_number_works_too(client, fetched):
+    assert client.post("/jobs", data={"url": "32023L0959"}).status_code == 303
+    assert fetched == ["32023L0959"]
+
+
+def test_a_link_to_another_site_is_refused_and_nothing_is_fetched(client, fetched):
+    rv = client.post("/jobs", data={"url": "https://example.com/?uri=CELEX:52023PC0702"})
+    assert rv.status_code == 400
+    assert b"Only links to" in rv.data
+    assert fetched == []
+
+
+def test_a_link_with_no_document_number_is_refused(client, fetched):
+    rv = client.post("/jobs", data={"url": "https://eur-lex.europa.eu/homepage.html"})
+    assert rv.status_code == 400
+    assert fetched == []
+
+
+def test_a_file_and_a_link_together_are_refused(client, fetched):
+    rv = client.post("/jobs", data={"pdf": (io.BytesIO(PDF_BYTES), "com.pdf"), "url": LINK})
+    assert rv.status_code == 400
+    assert b"not both" in rv.data
+    assert fetched == []
+
+
+def test_neither_a_file_nor_a_link_is_refused(client):
+    rv = client.post("/jobs", data={"url": "   "})
+    assert rv.status_code == 400
+    assert b"choose a PDF file or enter a EUR-Lex link" in rv.data
+
+
+def test_a_fetch_that_fails_reports_it_and_leaves_no_job(client, monkeypatch, tmp_path):
+    from a2t_web import source
+
+    def failing(celex, destination, data_dir):
+        raise source.SourceError(f"EUR-Lex did not supply a PDF for {celex}.", status=502)
+
+    monkeypatch.setattr(source, "fetch_pdf", failing)
+    rv = client.post("/jobs", data={"url": LINK})
+
+    assert rv.status_code == 502
+    assert b"did not supply a PDF for 52023PC0702" in rv.data
+    assert list((tmp_path / "uploads").glob("*")) == []
+
+
+def test_a_fetched_document_goes_through_the_same_gates_as_an_upload(
+        client, fetched, tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "sanity_check",
+                        lambda _pdf: (_ for _ in ()).throw(SanityError("Not an amendment.")))
+    rv = client.post("/jobs", data={"url": LINK})
+
+    assert rv.status_code == 400
+    assert b"Not an amendment." in rv.data
+    assert list((tmp_path / "uploads").glob("*")) == []
+
+
+def test_a_fetched_document_over_the_size_limit_is_refused(make_app, monkeypatch, tmp_path):
+    from a2t_web import source
+
+    def big(celex, destination, data_dir):
+        destination.write_bytes(PDF_BYTES + b"x" * 2048)
+
+    monkeypatch.setattr(source, "fetch_pdf", big)
+    client = make_app(max_upload_bytes=1024).test_client()
+    rv = client.post("/jobs", data={"url": LINK})
+
+    assert rv.status_code == 400
+    assert b"larger than the limit" in rv.data
+    assert list((tmp_path / "uploads").glob("*")) == []

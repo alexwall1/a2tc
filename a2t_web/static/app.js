@@ -7,17 +7,28 @@ function setText(id, text) {
   }
 }
 
-function wireUploadForm(formId, inputId) {
+function wireUploadForm(formId, inputId, urlId) {
   var form = document.getElementById(formId);
   if (!form) {
     return;
   }
   var input = document.getElementById(inputId);
+  var urlInput = urlId ? document.getElementById(urlId) : null;
   var maxBytes = Number(form.getAttribute("data-max-bytes") || "0");
   form.addEventListener("submit", function (event) {
     var file = input.files[0];
+    var link = urlInput ? urlInput.value.trim() : "";
+    if (file && link) {
+      window.alert("Give either a PDF or a EUR-Lex link, not both.");
+      event.preventDefault();
+      return;
+    }
+    if (!file && link) {
+      return;  // the server reads the document number from the link
+    }
     if (!file) {
-      window.alert("Choose a PDF file.");
+      window.alert(urlInput ? "Choose a PDF file or enter a EUR-Lex link."
+                            : "Choose a PDF file.");
       event.preventDefault();
       return;
     }

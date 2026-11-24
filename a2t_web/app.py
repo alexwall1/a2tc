@@ -27,7 +27,7 @@ from flask import (
 )
 
 from a2t_web import db as db_module
-from a2t_web import storage
+from a2t_web import source, storage
 from a2t_web.config import WebSettings, settings_from_env
 from a2t_web.jobs import CANCELLED, DONE, JobRegistry
 from a2t_web.pipeline import artifact_titles, tail
@@ -183,17 +183,41 @@ def create_app(settings: WebSettings | None = None) -> Flask:
     @app.post("/jobs")
     def upload():
         file = request.files.get("pdf")
-        if file is None or not file.filename:
-            return render_index_error("No file selected — choose a PDF file.", 400)
-        if not file.filename.lower().endswith(".pdf"):
-            return render_index_error("The file must be a PDF.", 400)
+        has_file = file is not None and bool(file.filename)
+        reference = request.form.get("url", "").strip()
+        if has_file and reference:
+            return render_index_error(
+                "Give either a PDF or a EUR-Lex link, not both.", 400)
+        if not has_file and not reference:
+            return render_index_error(
+                "Nothing to convert — choose a PDF file or enter a EUR-Lex link.", 400)
+
         job_id = secrets.token_urlsafe(12)
         pdf_path = settings.data_dir / "uploads" / f"{job_id}.pdf"
-        try:
-            storage.save_upload(file, pdf_path, settings.max_upload_bytes)
-        except storage.UploadTooLarge as exc:
-            pdf_path.unlink(missing_ok=True)
-            return render_index_error(str(exc), 400)
+
+        if has_file:
+            if not file.filename.lower().endswith(".pdf"):
+                return render_index_error("The file must be a PDF.", 400)
+            try:
+                storage.save_upload(file, pdf_path, settings.max_upload_bytes)
+            except storage.UploadTooLarge as exc:
+                pdf_path.unlink(missing_ok=True)
+                return render_index_error(str(exc), 400)
+            display_name = storage.safe_basename(file.filename)
+        else:
+            try:
+                celex = source.celex_from_reference(reference)
+                source.fetch_pdf(celex, pdf_path, settings.data_dir)
+            except source.SourceError as exc:
+                pdf_path.unlink(missing_ok=True)
+                return render_index_error(str(exc), exc.status)
+            if pdf_path.stat().st_size > settings.max_upload_bytes:
+                pdf_path.unlink(missing_ok=True)
+                return render_index_error(
+                    f"That document is larger than the limit "
+                    f"({settings.max_upload_bytes} bytes).", 400)
+            display_name = f"{celex}.pdf"
+
         error = gate_upload(pdf_path)
         if error is not None:
             pdf_path.unlink(missing_ok=True)
@@ -202,7 +226,7 @@ def create_app(settings: WebSettings | None = None) -> Flask:
             job_id,
             pdf_path,
             settings.data_dir / "jobs" / job_id,
-            storage.safe_basename(file.filename),
+            display_name,
         )
         worker.submit(job)
         return redirect(url_for("status", job_id=job.id), 303)
