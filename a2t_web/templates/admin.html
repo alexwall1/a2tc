@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Admin — job log — A2T Web{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('index') }}">&larr; Back</a></p>
+  <h1>Admin — job log</h1>
+  {% if entries %}
+  <table class="joblog">
+    <thead>
+      <tr><th>Job ID</th><th>File</th><th>Status</th><th>Created</th><th>Started</th><th>Finished</th><th>Error</th></tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td><code>{{ e.job_id }}</code></td>
+        <td>{{ e.pdf_name }}</td>
+        <td class="status">{{ e.status }}</td>
+        <td>{{ e.created_at | human_ts }}</td>
+        <td>{{ e.started_at | human_ts }}</td>
+        <td>{{ e.finished_at | human_ts }}</td>
+        <td class="error">{{ e.error }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No jobs have been run yet.</p>
+  {% endif %}
+{% endblock %}

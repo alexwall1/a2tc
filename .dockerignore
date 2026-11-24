@@ -1,0 +1,17 @@
+.git
+.secrets
+.venv
+venv
+build
+dist
+*.egg-info
+__pycache__
+*.pyc
+.pytest_cache
+webapp-data
+out
+out*
+*.pdf
+*.docx
+Dockerfile
+.dockerignore

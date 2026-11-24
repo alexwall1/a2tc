@@ -26,13 +26,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "flask>=3.0"]
+web = ["flask>=3.0"]
 
 [project.scripts]
 a2t = "a2t.cli:main"
+a2t-web = "a2t_web.app:main"
+a2t-web-users = "a2t_web.users:main"
 
 [tool.setuptools.packages.find]
 include = ["a2t*"]
+
+[tool.setuptools.package-data]
+a2t_web = ["templates/*", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

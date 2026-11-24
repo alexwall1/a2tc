@@ -1,4 +1,4 @@
-# Secrets — the LLM tier reads this file from the project root
+# Legacy key file — the LLM tier now reads `.secrets/openrouter-key` (ignored below)
 .openrouter_key
 
 # Sample legislation. Proposals and consolidated acts are public documents on
@@ -9,6 +9,12 @@
 # Generated output: tracked-changes documents, reports, retrieval and LLM caches
 /out*/
 *.docx
+
+# Web app runtime data: user uploads and job directories
+/webapp-data/
+
+# Local secrets: web-app user/admin passwords (and opencode's own key)
+.secrets/
 
 # Working notes. Development scratch, not part of the delivered project.
 /PHASE0.md

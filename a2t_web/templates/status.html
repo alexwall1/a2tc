@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }} — A2T Web{% endblock %}
+{% block head %}
+  {% if job.status in ["queued", "running"] %}<meta http-equiv="refresh" content="10">{% endif %}
+{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('index') }}">&larr; Upload another proposal</a></p>
+  <h1>Conversion job</h1>
+  <dl class="job-meta">
+    <dt>File</dt>
+    <dd>{{ job.pdf_name }}</dd>
+    <dt>Status</dt>
+    <dd><span id="status" class="status">{{ job.status }}</span></dd>
+    <dt>Created</dt>
+    <dd><span id="created-at">{{ job.created_at | human_ts }}</span></dd>
+    <dt>Started</dt>
+    <dd><span id="started-at">{{ job.started_at | human_ts }}</span></dd>
+    <dt>Finished</dt>
+    <dd><span id="finished-at">{{ job.finished_at | human_ts }}</span></dd>
+  </dl>
+  <p id="queue-position"></p>
+  <p id="error" class="error" hidden></p>
+  <h2>Artifacts</h2>
+  <ul id="artifacts" class="artifacts"></ul>
+  <h2>Log</h2>
+  <pre id="log-content" class="log"></pre>
+  <div id="report-section" class="report-section" hidden>
+    <h3>Report</h3>
+    <div id="report-content" class="report"></div>
+  </div>
+  <form id="cancel-form" method="post" action="{{ url_for('cancel_api', job_id=job.id) }}">
+    <button type="submit">Cancel job</button>
+  </form>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      startPolling({{ job.id | tojson }}, {{ poll_seconds }});
+      wireCancelForm("cancel-form");
+    });
+  </script>
+{% endblock %}

@@ -42,6 +42,88 @@ silently.
 
 Base-act retrieval dominates the runtime; expect a couple of minutes.
 
+## Web app
+
+A small self-hosted web front end for the conversion pipeline: upload a COM
+PDF, get an immediate sanity check, and watch the background conversion on a
+status page that polls the JSON API (no long-lived connections). It binds to
+`127.0.0.1` only.
+
+```bash
+.venv/bin/pip install -e ".[web]"
+.venv/bin/a2t-web
+```
+
+Then open <http://127.0.0.1:5000>, upload a proposal, and keep the status page
+open until the tracked-changes documents and `report.md` are ready to download.
+
+- Uploads, results, and the SQLite database (`a2t.db`) live in `./webapp-data`
+  by default; `A2T_WEB_DATA_DIR` overrides the location.
+- The web app runs the pipeline with the LLM tier (`--llm`) enabled, so an
+  OpenRouter key must be available to the worker process: set
+  `OPENROUTER_API_KEY` in the environment that starts `a2t-web`, or place
+  `.secrets/openrouter-key` in the directory where you start it.
+- Bind to `127.0.0.1` only. Exposing it on the LAN (`A2T_WEB_HOST=0.0.0.0`)
+  exposes upload and download endpoints — don't. With users configured the
+  app is no longer unauthenticated on the LAN, but localhost-only binding is
+  still recommended.
+- The pipeline runs as a single background subprocess at a time
+  (`A2T_WEB_MAX_WORKERS` defaults to 1) so concurrent runs cannot race on the
+  shared retrieval cache.
+
+### Access control
+
+`a2t-web` is username+password-gated: every page and every `/api/*` endpoint
+requires a signed-in session once the SQLite `users` table
+(`<A2T_WEB_DATA_DIR>/a2t.db`) contains a user. Users are seeded from the
+environment on the first run — and only while the table is still empty, so
+restarts never duplicate accounts. Set `A2T_ADMIN_PASSWORD` to seed an
+`admin`-role account and/or `A2T_USER_PASSWORD` to seed a normal `user`-role
+account:
+
+```bash
+A2T_ADMIN_PASSWORD='a strong admin password' .venv/bin/a2t-web
+A2T_ADMIN_PASSWORD='...' A2T_ADMIN_USERNAME='root' .venv/bin/a2t-web
+A2T_ADMIN_PASSWORD='...' A2T_USER_PASSWORD='...' .venv/bin/a2t-web
+A2T_USER_PASSWORD='...' A2T_USER_USERNAME='alice' .venv/bin/a2t-web
+```
+
+- `A2T_ADMIN_USERNAME` defaults to `admin`, `A2T_USER_USERNAME` to `user`.
+  Usernames are trimmed; passwords are stored as salted hashes, never
+  plaintext.
+- If neither `A2T_ADMIN_PASSWORD` nor `A2T_USER_PASSWORD` is set, no users are
+  seeded and the app starts in open mode (no login required) until you create
+  a user.
+- The login form takes a username and a password; the role comes from the
+  users table (`user` or `admin`). A wrong username and a wrong password show
+  the same generic error, so the form cannot be used to enumerate users.
+- `GET /admin` shows a durable, server-rendered log of every job that has been
+  run (id, file, status, timestamps, error), newest first, capped at 200
+  entries; it survives restarts and cleaned-up jobs. It requires an admin
+  account; a plain user gets a 403.
+- `GET /logout` clears your session. Sessions are signed cookies; the default
+  signing key is random per process (everyone re-logs in after a restart).
+  Set `A2T_WEB_SECRET_KEY` to a fixed value to keep sessions valid across
+  restarts.
+- The old `.secrets/user-password` / `.secrets/admin-password` files are
+  **deprecated and no longer read**; migrate to the seed environment
+  variables above or to the CLI below. The `.secrets/openrouter-key` file is
+  still read by the pipeline (see above) and is unrelated to access control.
+
+To add a user or reset a password on an existing deployment, use the
+`a2t-web-users` CLI (the database file must already exist — start the app
+once, or point `--db` at your `<A2T_WEB_DATA_DIR>/a2t.db`):
+
+```bash
+.venv/bin/a2t-web-users create-admin --db webapp-data/a2t.db --username admin --password 'new pass'
+.venv/bin/a2t-web-users create-user --db webapp-data/a2t.db --username alice --password '...'
+```
+
+Note: the database lives under `<A2T_WEB_DATA_DIR>` (`webapp-data` by
+default), which is excluded from the Docker image and is ephemeral on the
+Render free tier — history will not survive a re-deploy there. Point
+`A2T_WEB_DATA_DIR` at a persistent volume to keep job history durable.
+
 ## Options
 
 `a2t convert PDF`:
@@ -57,7 +139,8 @@ Base-act retrieval dominates the runtime; expect a couple of minutes.
 | `--recitals` | Insert the proposal's own preamble ahead of the articles, as tracked insertions. Off by default — see below. |
 
 The LLM tier is optional and needs an OpenRouter key, from `$OPENROUTER_API_KEY` or
-a `.openrouter_key` file in the project root. Without `--llm` the app is entirely
+a `.secrets/openrouter-key` file in the project root (a legacy `.openrouter_key`
+file is still recognized). Without `--llm` the app is entirely
 offline apart from EUR-Lex retrieval.
 
 ## Recitals

@@ -1,0 +1,203 @@
+:root {
+  --fg: #1a1a1a;
+  --bg: #f7f7f5;
+  --accent: #2a5db0;
+  --error: #a03030;
+  --border: #d8d8d4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  line-height: 1.5;
+}
+
+.container {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+
+.error {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.status {
+  font-weight: 600;
+}
+
+.job-meta dt {
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+.job-meta dd {
+  margin: 0;
+}
+
+.artifact-name {
+  display: block;
+  font-size: 0.8em;
+  color: var(--fg);
+  opacity: 0.7;
+}
+
+.log {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  padding: 0.75rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-size: 0.85rem;
+}
+
+.report-section {
+  margin-top: 0.75rem;
+}
+
+.report {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+
+.report h1 {
+  font-size: 1.25rem;
+  margin: 0 0 0.5rem 0;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.report h2 {
+  font-size: 1.1rem;
+  margin: 1rem 0 0.5rem 0;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.report h3 {
+  font-size: 0.95rem;
+  margin: 0.75rem 0 0.25rem 0;
+}
+
+.report p {
+  margin: 0.5rem 0;
+}
+
+.report table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75rem 0;
+}
+
+.report th,
+.report td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.9rem;
+}
+
+.report th {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.report code {
+  font-size: 0.9em;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.1rem 0.3rem;
+}
+
+.report blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--border);
+  opacity: 0.8;
+}
+
+.report ul {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+}
+
+.report li {
+  margin: 0.15rem 0;
+}
+
+button,
+input[type="file"] {
+  margin-top: 0.5rem;
+}
+
+.topnav {
+  margin-bottom: 1rem;
+}
+
+.topnav a {
+  margin-right: 1rem;
+}
+
+.login-form {
+  max-width: 24rem;
+}
+
+.login-form label {
+  display: block;
+  margin-top: 0.75rem;
+  font-weight: 600;
+}
+
+.login-form input[type="text"],
+.login-form input[type="password"] {
+  width: 100%;
+  padding: 0.4rem;
+  margin-top: 0.25rem;
+}
+
+.login-form button {
+  margin-top: 1rem;
+}
+
+.joblog {
+  border-collapse: collapse;
+  width: 100%;
+  background: #ffffff;
+}
+
+.joblog th,
+.joblog td {
+  border: 1px solid var(--border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.9rem;
+}
+
+.joblog th {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.joblog td.error {
+  color: var(--error);
+}
+
+.joblog code {
+  font-size: 0.85em;
+}
+
+.muted {
+  opacity: 0.7;
+}

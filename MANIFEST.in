@@ -1,0 +1,2 @@
+include a2t_web/templates/*
+include a2t_web/static/*
