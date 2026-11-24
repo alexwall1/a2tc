@@ -45,6 +45,9 @@ class Job:
     finished_at: float | None = None
     proc: subprocess.Popen | None = field(default=None, repr=False)
     cancelled: bool = False
+    # Set when the document is to be fetched from EUR-Lex by the worker rather than
+    # having been uploaded; `pdf_path` is then where the fetched file will be put.
+    celex: str | None = None
 
 
 class JobRegistry:
@@ -71,8 +74,10 @@ class JobRegistry:
         else:
             self._db.insert_job(job)
 
-    def create(self, job_id: str, pdf_path: Path, outdir: Path, pdf_name: str) -> Job:
-        job = Job(id=job_id, pdf_path=pdf_path, outdir=outdir, pdf_name=pdf_name)
+    def create(self, job_id: str, pdf_path: Path, outdir: Path, pdf_name: str,
+               celex: str | None = None) -> Job:
+        job = Job(id=job_id, pdf_path=pdf_path, outdir=outdir, pdf_name=pdf_name,
+                  celex=celex)
         with self._lock:
             self._jobs[job_id] = job
             self._persist(job)

@@ -205,18 +205,22 @@ def create_app(settings: WebSettings | None = None) -> Flask:
                 return render_index_error(str(exc), 400)
             display_name = storage.safe_basename(file.filename)
         else:
+            # Only the link is read here, cheaply. The document is fetched and checked
+            # by the worker, so a slow EUR-Lex never holds this request.
             try:
                 celex = source.celex_from_reference(reference)
-                source.fetch_pdf(celex, pdf_path, settings.data_dir)
             except source.SourceError as exc:
-                pdf_path.unlink(missing_ok=True)
                 return render_index_error(str(exc), exc.status)
-            if pdf_path.stat().st_size > settings.max_upload_bytes:
-                pdf_path.unlink(missing_ok=True)
-                return render_index_error(
-                    f"That document is larger than the limit "
-                    f"({settings.max_upload_bytes} bytes).", 400)
             display_name = f"{celex}.pdf"
+            job = registry.create(
+                job_id,
+                pdf_path,
+                settings.data_dir / "jobs" / job_id,
+                display_name,
+                celex=celex,
+            )
+            worker.submit(job)
+            return redirect(url_for("status", job_id=job.id), 303)
 
         error = gate_upload(pdf_path)
         if error is not None:

@@ -15,9 +15,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from a2t_web import pipeline
+from a2t.cli import EXIT_PARTIAL
+from a2t_web import pipeline, source, storage
 from a2t_web.config import WebSettings
 from a2t_web.jobs import CANCELLED, DONE, FAILED, RUNNING, Job, JobRegistry
+from a2t_web.sanity import SanityError, sanity_check
 
 CANCEL_GRACE_SECONDS = 5.0
 CLEANUP_INTERVAL_MINIMUM = 3600.0
@@ -82,10 +84,21 @@ class Worker:
             self.registry.finalize(job_id, status=CANCELLED)
             return
         job.outdir.mkdir(parents=True, exist_ok=True)
-        command = pipeline.build_command(job.pdf_path, job.outdir, self.settings.cache_dir)
         log_path = job.outdir / "a2t.log"
         proc: subprocess.Popen | None = None
         try:
+            if job.celex:
+                problem = self._obtain(job, log_path)
+                if self.registry.was_cancelled(job_id):
+                    job.pdf_path.unlink(missing_ok=True)
+                    self.registry.finalize(job_id, status=CANCELLED)
+                    return
+                if problem is not None:
+                    job.pdf_path.unlink(missing_ok=True)
+                    self.registry.finalize(job_id, status=FAILED, error=problem)
+                    return
+            command = pipeline.build_command(
+                job.pdf_path, job.outdir, self.settings.cache_dir)
             with log_path.open("ab") as log_file:
                 proc = subprocess.Popen(
                     command,
@@ -118,6 +131,13 @@ class Worker:
                 self.registry.finalize(job_id, status=CANCELLED)
             elif returncode == 0:
                 self.registry.finalize(job_id, status=DONE)
+            elif returncode == EXIT_PARTIAL:
+                # Some acts converted and others could not be. The documents and the
+                # report exist, and the report lists what was left out, so the job is
+                # done — with a note, rather than failed with its results hidden.
+                self.registry.finalize(
+                    job_id, status=DONE,
+                    error="Some acts could not be converted — see the report and the log.")
             else:
                 self.registry.finalize(
                     job_id,
@@ -129,6 +149,40 @@ class Worker:
                 _terminate(proc)
             self.registry.set_proc(job_id, None)
             self.registry.finalize(job_id, status=FAILED, error=str(exc))
+
+    def _obtain(self, job: Job, log_path: Path) -> str | None:
+        """Fetch a linked document and give it the checks an upload gets at the door.
+
+        Runs here, not in the request: fetching can take tens of seconds, and what
+        happens to it is written to the job's log, which the status page already shows.
+        Returns the reason it cannot be converted, or None when `job.pdf_path` is ready.
+        A fetch cannot be interrupted, so a cancel is looked for after it returns; it is
+        bounded by the fetcher's own timeouts.
+        """
+
+        def note(message: str) -> None:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+
+        note(f"Fetching {job.celex} from EUR-Lex…")
+        try:
+            source.fetch_pdf(job.celex, job.pdf_path, self.settings.data_dir)
+        except source.SourceError as exc:
+            note(str(exc))
+            return str(exc)
+        if job.pdf_path.stat().st_size > self.settings.max_upload_bytes:
+            return (f"That document is larger than the limit "
+                    f"({self.settings.max_upload_bytes} bytes).")
+        if not storage.looks_like_pdf(job.pdf_path):
+            return "This does not look like a PDF file."
+        note("Fetched; checking that it amends something…")
+        try:
+            sanity_check(job.pdf_path)
+        except SanityError as exc:
+            note(str(exc))
+            return str(exc)
+        note("Converting…")
+        return None
 
     def cancel(self, job_id: str) -> bool:
         """Cancel a queued/running job; False for unknown or finished jobs.

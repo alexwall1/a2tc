@@ -42,6 +42,10 @@ silently.
 
 Base-act retrieval dominates the runtime; expect a couple of minutes.
 
+`convert` exits 0 when every act was converted, 3 when some were and some were not
+(the documents and `report.md` exist, and the report lists what was left out), and 1
+when nothing was converted or the input could not be read.
+
 ## Web app
 
 A small self-hosted web front end for the conversion pipeline: upload a COM
@@ -62,8 +66,10 @@ open until the tracked-changes documents and `report.md` are ready to download.
   adopted amending act (the same form, or `eur-lex.europa.eu/eli/dir/2023/959/oj`) — or
   just its CELEX number. Only the document number is read from the link, and only links
   to `eur-lex.europa.eu`, `publications.europa.eu` and `data.europa.eu` are accepted; the
-  PDF is then fetched from EUR-Lex itself (falling back to the Publications Office when
-  EUR-Lex answers "not ready") and goes through the same checks as an upload. A
+  PDF is then fetched from EUR-Lex itself by the background worker (falling back to the
+  Publications Office when EUR-Lex answers "not ready"), with progress in the job's log,
+  and goes through the same checks as an upload — a document that fails them ends the
+  job as failed, with the reason. A
   consolidated text (CELEX `0…`) is refused: it is what amendments apply to, not an
   amendment. Fetched PDFs are kept in `<data dir>/fetched/`.
 - Uploads, results, and the SQLite database (`a2t.db`) live in `./webapp-data`

@@ -23,6 +23,7 @@ flag the cases where the two readings disagree.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import date
 from functools import lru_cache
@@ -76,22 +77,41 @@ def _parse_created(value: str | None) -> date | None:
         return None
 
 
+LISTING_ATTEMPTS = 3
+LISTING_BACKOFF = 3.0  # seconds, times the attempt number
+
+
+def _transient(exc: Exception) -> bool:
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    response = getattr(exc, "response", None)
+    return response is not None and response.status_code >= 500
+
+
 @lru_cache(maxsize=64)
 def list_version_records(base_celex: str, timeout: int = 90) -> tuple[Version, ...]:
     """Consolidated versions of a sector-0 CELEX, oldest start date first."""
     base = base_celex.strip().upper()
-    try:
-        response = requests.get(
-            CELLAR_SPARQL,
-            params={"query": VERSIONS_QUERY.format(base=base),
-                    "format": "application/sparql-results+json"},
-            headers={"Accept": "application/sparql-results+json"},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        rows = response.json()["results"]["bindings"]
-    except Exception as exc:  # network, JSON, or endpoint trouble
-        raise VersionError(f"could not list versions for {base}: {exc}") from exc
+    for attempt in range(LISTING_ATTEMPTS):
+        try:
+            response = requests.get(
+                CELLAR_SPARQL,
+                params={"query": VERSIONS_QUERY.format(base=base),
+                        "format": "application/sparql-results+json"},
+                headers={"Accept": "application/sparql-results+json"},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            rows = response.json()["results"]["bindings"]
+            break
+        except Exception as exc:  # network, JSON, or endpoint trouble
+            # A read timeout or a 5xx from Cellar is usually gone on the next request: it
+            # cost one act of Directive 2020/1056 its conversion in an otherwise complete
+            # run, and 503s did the same to a corpus run earlier.
+            if attempt + 1 < LISTING_ATTEMPTS and _transient(exc):
+                time.sleep(LISTING_BACKOFF * (attempt + 1))
+                continue
+            raise VersionError(f"could not list versions for {base}: {exc}") from exc
 
     # A version can come back on several rows; keep the earliest creation date seen,
     # since that is when the text first became readable.

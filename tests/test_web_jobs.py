@@ -599,3 +599,175 @@ def test_worker_sweep_delegates_to_registry(tmp_path):
         assert not job_dir.exists()
     finally:
         worker.shutdown()
+
+# ----------------------------------------------- worker: a document linked, not uploaded
+
+
+PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\n%%EOF\n"
+
+
+def make_link_job(registry, tmp_path, celex="52023PC0702"):
+    return registry.create("l1", tmp_path / "uploads" / "l1.pdf", tmp_path / "jobs" / "l1",
+                           f"{celex}.pdf", celex=celex)
+
+
+@pytest.fixture
+def link(monkeypatch):
+    """Fake EUR-Lex: records fetches; the sanity check passes unless told otherwise."""
+    state = {"fetched": [], "write": PDF_BYTES, "error": None, "sanity": None}
+
+    def fetch_pdf(celex, destination, data_dir):
+        state["fetched"].append(celex)
+        if state["error"]:
+            raise worker_module.source.SourceError(state["error"], status=502)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(state["write"])
+
+    def sanity(pdf):
+        if state["sanity"]:
+            raise worker_module.SanityError(state["sanity"])
+
+    monkeypatch.setattr(worker_module.source, "fetch_pdf", fetch_pdf)
+    monkeypatch.setattr(worker_module, "sanity_check", sanity)
+    monkeypatch.setattr(worker_module.pipeline, "build_command",
+                        fake_build(WRITE_REPORT_SCRIPT))
+    return state
+
+
+def test_a_linked_document_is_fetched_checked_and_converted(tmp_path, settings, link):
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_link_job(registry, tmp_path)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == DONE)
+
+        assert link["fetched"] == ["52023PC0702"]
+        assert job.pdf_path.read_bytes() == PDF_BYTES
+        log = (tmp_path / "jobs" / "l1" / "a2t.log").read_text()
+        assert "Fetching 52023PC0702 from EUR-Lex" in log
+        assert "Converting" in log
+    finally:
+        worker.shutdown()
+
+
+def test_a_fetch_that_fails_fails_the_job_with_the_reason(tmp_path, settings, link):
+    link["error"] = "EUR-Lex did not supply a PDF for 52023PC0702."
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_link_job(registry, tmp_path)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == FAILED)
+
+        assert "did not supply a PDF" in registry.get(job.id).error
+        assert not job.pdf_path.exists()
+        assert not (tmp_path / "jobs" / "l1" / "report.md").exists()  # no pipeline ran
+    finally:
+        worker.shutdown()
+
+
+def test_a_fetched_document_that_amends_nothing_fails_the_job(tmp_path, settings, link):
+    link["sanity"] = "This document amends only annexes of Directive 2003/87/EC."
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_link_job(registry, tmp_path)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == FAILED)
+
+        assert "only annexes" in registry.get(job.id).error
+        assert not job.pdf_path.exists()
+    finally:
+        worker.shutdown()
+
+
+def test_a_fetched_file_that_is_not_a_pdf_fails_the_job(tmp_path, settings, link):
+    link["write"] = b"<html>Please wait</html>"
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_link_job(registry, tmp_path)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == FAILED)
+
+        assert "does not look like a PDF" in registry.get(job.id).error
+    finally:
+        worker.shutdown()
+
+
+def test_a_fetched_document_over_the_size_limit_fails_the_job(tmp_path, link):
+    settings = WebSettings(data_dir=tmp_path, cache_dir=tmp_path / "cache", max_workers=1,
+                           job_timeout=3600, job_ttl_hours=24, max_upload_bytes=16)
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_link_job(registry, tmp_path)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == FAILED)
+
+        assert "larger than the limit" in registry.get(job.id).error
+    finally:
+        worker.shutdown()
+
+
+def test_a_job_cancelled_before_it_starts_fetches_nothing(tmp_path, settings, link):
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_link_job(registry, tmp_path)
+        registry.request_cancel(job.id)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == CANCELLED)
+
+        assert link["fetched"] == []
+    finally:
+        worker.shutdown()
+
+
+def test_an_uploaded_document_is_not_fetched_or_rechecked_by_the_worker(
+        tmp_path, settings, link):
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_job(registry, tmp_path)           # no celex: an upload
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == DONE)
+
+        assert link["fetched"] == []
+    finally:
+        worker.shutdown()
+
+
+PARTIAL_SCRIPT = (
+    "import pathlib, sys;"
+    "out = pathlib.Path(sys.argv[1]);"
+    "out.mkdir(parents=True, exist_ok=True);"
+    "(out / 'report.md').write_text('# report');"
+    "print('NOT CONVERTED  Regulation (EU) 2020/1056: could not list versions');"
+    "sys.exit(3)"
+)
+
+
+def test_a_partial_conversion_is_done_with_a_note_not_failed(tmp_path, monkeypatch, settings):
+    """`convert` exits 3 when some acts converted and others did not."""
+    monkeypatch.setattr(worker_module.pipeline, "build_command", fake_build(PARTIAL_SCRIPT))
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_job(registry, tmp_path)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == DONE)
+
+        snapshot = registry.state_snapshot(job.id)
+        assert snapshot["status"] == DONE
+        assert "could not be converted" in snapshot["error"]
+        assert (tmp_path / "jobs" / job.id / "report.md").is_file()
+    finally:
+        worker.shutdown()
+
+
+def test_the_exit_status_for_a_partial_conversion_is_not_clicks_usage_error():
+    from a2t.cli import EXIT_PARTIAL
+
+    assert EXIT_PARTIAL == 3

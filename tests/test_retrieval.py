@@ -365,3 +365,74 @@ def test_a_pre_2000_title_with_the_number_first_confirms_the_act():
     citation = parse_citation("Regulation (EC) 1257/96")
     assert title_matches(citation, "Council Regulation (EC) No 1257/96 of 20 June 1996 "
                                    "concerning humanitarian aid")
+
+
+# ---------------------------------------------------- a transient Cellar answer is retried
+
+
+def _answers(monkeypatch, *outcomes):
+    """Replace requests.get: each outcome is an exception to raise or a response to return."""
+    import requests
+
+    from a2t.retrieval import versions as versions_module
+
+    calls = []
+
+    class Ok:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": {"bindings": [
+                {"celex": {"value": "02003L0087-20240301"}}]}}
+
+    class Bad:
+        def __init__(self, status):
+            self.status_code = status
+
+        def raise_for_status(self):
+            raise requests.HTTPError(f"{self.status_code}", response=self)
+
+    def get(*args, **kwargs):
+        calls.append(1)
+        outcome = outcomes[min(len(calls), len(outcomes)) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return Ok() if outcome == "ok" else Bad(outcome)
+
+    monkeypatch.setattr(versions_module.requests, "get", get)
+    monkeypatch.setattr(versions_module.time, "sleep", lambda s: None)
+    versions_module.list_version_records.cache_clear()
+    return calls
+
+
+def test_a_read_timeout_from_cellar_is_retried(monkeypatch):
+    import requests
+
+    calls = _answers(monkeypatch, requests.ReadTimeout("slow"), "ok")
+    assert list_versions("02003L0087") == (date(2024, 3, 1),)
+    assert len(calls) == 2
+
+
+def test_a_503_from_cellar_is_retried(monkeypatch):
+    calls = _answers(monkeypatch, 503, 503, "ok")
+    assert list_versions("02003L0088") == (date(2024, 3, 1),)
+    assert len(calls) == 3
+
+
+def test_a_404_from_cellar_is_not_retried(monkeypatch):
+    calls = _answers(monkeypatch, 404)
+    with pytest.raises(VersionError, match="could not list versions"):
+        list_versions("02003L0089")
+    assert len(calls) == 1
+
+
+def test_cellar_staying_down_ends_in_a_version_error(monkeypatch):
+    import requests
+
+    calls = _answers(monkeypatch, requests.ReadTimeout("slow"))
+    with pytest.raises(VersionError, match="could not list versions"):
+        list_versions("02003L0090")
+    assert len(calls) == 3

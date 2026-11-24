@@ -43,6 +43,11 @@ def main() -> None:
     _echo_warnings()
 
 
+# `convert` exit status when at least one act was converted and at least one was not.
+# 0 is success, 1 is nothing converted, and 2 is click's own for a usage error.
+EXIT_PARTIAL = 3
+
+
 def _open_proposal(pdf: Path, as_of):
     """Lines, operative part, detection and date for a command that needs all four.
 
@@ -532,8 +537,10 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
         click.echo(f"{flagged} change(s) need human review — see the report "
                    f"and the Word comments.")
     if failures:
-        # Exit 0 after "NOT CONVERTED" reads as success to a script or a CI step.
-        raise SystemExit(1)
+        # Exit 0 after "NOT CONVERTED" reads as success to a script or a CI step. Some
+        # acts converted and others not is a different outcome from nothing converting:
+        # the documents and the report exist, so a caller may want to use them.
+        raise SystemExit(EXIT_PARTIAL if run.outcomes else 1)
 
 
 @main.command()
