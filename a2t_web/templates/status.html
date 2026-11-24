@@ -21,21 +21,28 @@
   <p id="queue-position"></p>
   <p id="error" class="error" hidden></p>
   <h2>Artifacts</h2>
-  <ul id="artifacts" class="artifacts"></ul>
+  <ul id="artifacts" class="artifacts">
+    {% for artifact in artifacts %}
+    <li><a href="{{ artifact.download_url }}">{{ artifact.title or artifact.name }}</a>
+      {% if artifact.title and artifact.title != artifact.name %}<span class="artifact-name">{{ artifact.name }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
   <h2>Log</h2>
   <pre id="log-content" class="log"></pre>
   <div id="report-section" class="report-section" hidden>
     <h3>Report</h3>
     <div id="report-content" class="report"></div>
   </div>
+  {% if job.status in ["queued", "running"] %}
   <form id="cancel-form" method="post" action="{{ url_for('cancel_api', job_id=job.id) }}">
     <button type="submit">Cancel job</button>
   </form>
+  {% endif %}
   <script src="{{ url_for('static', filename='app.js') }}"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
       startPolling({{ job.id | tojson }}, {{ poll_seconds }});
-      wireCancelForm("cancel-form");
+      if (document.getElementById("cancel-form")) { wireCancelForm("cancel-form"); }
     });
   </script>
 {% endblock %}

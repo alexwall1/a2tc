@@ -223,6 +223,32 @@ class Database:
                     (status, error, started_at, finished_at, job_id),
                 )
 
+    def get_job(self, job_id: str) -> dict | None:
+        """One job's persisted record (keys as in `list_jobs`), or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, pdf_name, status, error, created_at, started_at,"
+                " finished_at FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        return {
+            "job_id": row[0], "pdf_name": row[1], "status": row[2], "error": row[3],
+            "created_at": row[4], "started_at": row[5], "finished_at": row[6],
+        }
+
+    def fail_orphans(self, message: str, now: float) -> int:
+        """Mark jobs still queued or running as failed; returns how many.
+
+        Only RUNNING is never persisted, so a job in progress when the server stopped is
+        left `queued` for good. Called once at start-up, when nothing can be running.
+        """
+        with self._write_lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "UPDATE jobs SET status = 'failed', error = ?, finished_at = ?"
+                    " WHERE status IN ('queued', 'running')", (message, now))
+                return cursor.rowcount
+
     def list_jobs(self, limit: int | None = None) -> list[dict]:
         """Job history, newest first; key ``job_id`` matches the admin template."""
         sql = (

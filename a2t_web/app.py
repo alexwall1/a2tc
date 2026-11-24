@@ -8,7 +8,9 @@ and redirects to a status page that polls the JSON API.
 from __future__ import annotations
 
 import atexit
+import re
 import secrets
+import time
 import sqlite3
 import sys
 from datetime import datetime
@@ -36,6 +38,7 @@ from a2t_web.users import seed_users
 from a2t_web.worker import Worker
 
 ADMIN_LOG_LIMIT = 200
+JOB_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def human_ts(ts: float | None) -> str:
@@ -64,6 +67,9 @@ def create_app(settings: WebSettings | None = None) -> Flask:
 
     db = db_module.Database(settings.db_path)
     db.init()
+    # Nothing can be running yet: whatever the database still has as queued or running
+    # was cut off by the last shutdown, and would otherwise stay that way forever.
+    db.fail_orphans("The server restarted while this job was running.", time.time())
     seed_users(settings, db)
 
     app = Flask(__name__)
@@ -90,6 +96,43 @@ def create_app(settings: WebSettings | None = None) -> Flask:
 
     def api_error(message: str, status: int = 404):
         return jsonify({"error": message}), status
+
+    def lookup(job_id: str):
+        """`(snapshot, job_dir)` for a job, whether or not this process ran it.
+
+        The registry only knows jobs started since the server last started. Older ones
+        are rebuilt from their database row, with their files read from the job
+        directory, so a link in the admin log keeps working after a restart.
+        """
+        snapshot = registry.state_snapshot(job_id)
+        if snapshot is not None:
+            return snapshot, registry.job_dir(job_id)
+        if not JOB_ID.fullmatch(job_id):
+            return None, None
+        row = db.get_job(job_id)
+        if row is None:
+            return None, None
+        snapshot = {
+            "id": row["job_id"], "status": row["status"], "error": row["error"],
+            "pdf_name": row["pdf_name"], "queue_position": None,
+            "created_at": row["created_at"], "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+        }
+        return snapshot, settings.data_dir / "jobs" / job_id
+
+    def artifact_entries(job_id: str, snapshot: dict, job_dir) -> list[dict]:
+        """The downloadable files of a finished job; none before then, or once removed."""
+        if snapshot["status"] != DONE or job_dir is None:
+            return []
+        titles = artifact_titles(job_dir / "report.md")
+        return [
+            {
+                "name": path.name,
+                "title": titles.get(path.name),
+                "download_url": url_for("artifact", job_id=job_id, name=path.name),
+            }
+            for path in storage.list_artifacts(job_dir)
+        ]
 
     @app.before_request
     def _require_auth():
@@ -147,6 +190,11 @@ def create_app(settings: WebSettings | None = None) -> Flask:
         if auth_enabled and session.get("role") != "admin":
             abort(403)
         entries = db.list_jobs(limit=ADMIN_LOG_LIMIT)
+        for entry in entries:
+            snapshot, job_dir = lookup(entry["job_id"])
+            entry["files"] = (artifact_entries(entry["job_id"], snapshot, job_dir)
+                              if snapshot is not None else [])
+            entry["removed"] = (entry["status"] == DONE and not entry["files"])
         return render_template("admin.html", entries=entries)
 
     def render_index_error(message: str, status: int):
@@ -237,42 +285,28 @@ def create_app(settings: WebSettings | None = None) -> Flask:
 
     @app.get("/jobs/<job_id>")
     def status(job_id: str):
-        job = registry.state_snapshot(job_id)
+        job, job_dir = lookup(job_id)
         if job is None:
             abort(404)
         return render_template(
-            "status.html", job=job, poll_seconds=settings.poll_seconds
+            "status.html", job=job, poll_seconds=settings.poll_seconds,
+            artifacts=artifact_entries(job_id, job, job_dir),
         )
 
     @app.get("/api/jobs/<job_id>")
     def api_status(job_id: str):
-        snapshot = registry.state_snapshot(job_id)
+        snapshot, job_dir = lookup(job_id)
         if snapshot is None:
             return api_error("Job not found")
-        if snapshot["status"] == DONE:
-            job_dir = registry.job_dir(job_id)
-            if job_dir is None:
-                return api_error("Job not found")
-            artifacts = [
-                {
-                    "name": path.name,
-                    "title": artifact_titles(job_dir / "report.md").get(path.name),
-                    "download_url": url_for("artifact", job_id=job_id, name=path.name),
-                }
-                for path in storage.list_artifacts(job_dir)
-            ]
-        else:
-            artifacts = []
-        return jsonify({**snapshot, "artifacts": artifacts})
+        return jsonify({**snapshot, "artifacts": artifact_entries(job_id, snapshot, job_dir)})
 
     @app.get("/api/jobs/<job_id>/artifacts/<name>")
     def artifact(job_id: str, name: str):
-        snapshot = registry.state_snapshot(job_id)
+        snapshot, job_dir = lookup(job_id)
         if snapshot is None:
             return api_error("Job not found")
         if snapshot["status"] != DONE:
             return api_error("Artifacts are available once the job is done", 404)
-        job_dir = registry.job_dir(job_id)
         if job_dir is None:
             return api_error("Job not found")
         path = storage.resolve_artifact(job_dir, name)
@@ -300,10 +334,8 @@ def create_app(settings: WebSettings | None = None) -> Flask:
 
     @app.get("/api/jobs/<job_id>/log")
     def job_log(job_id: str):
-        if registry.state_snapshot(job_id) is None:
-            return api_error("Job not found")
-        job_dir = registry.job_dir(job_id)
-        if job_dir is None:
+        snapshot, job_dir = lookup(job_id)
+        if snapshot is None or job_dir is None:
             return api_error("Job not found")
         return (
             tail(job_dir / "a2t.log"),
@@ -313,12 +345,11 @@ def create_app(settings: WebSettings | None = None) -> Flask:
 
     @app.get("/api/jobs/<job_id>/report")
     def report_api(job_id: str):
-        snapshot = registry.state_snapshot(job_id)
+        snapshot, job_dir = lookup(job_id)
         if snapshot is None:
             return api_error("Job not found")
         if snapshot["status"] != DONE:
             return api_error("The report is available once the job is done", 404)
-        job_dir = registry.job_dir(job_id)
         if job_dir is None:
             return api_error("Job not found")
         path = storage.resolve_artifact(job_dir, "report.md")

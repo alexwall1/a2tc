@@ -288,3 +288,32 @@ def test_basic_thread_safety_concurrent_writes(tmp_path):
     rows = db.list_jobs()
     assert len(rows) == 20
     assert all(r["status"] == DONE for r in rows)
+
+def test_get_job_returns_the_stored_record_or_none(tmp_path):
+    from types import SimpleNamespace
+
+    db = Database(tmp_path / "a2t.db")
+    db.init()
+    db.insert_job(SimpleNamespace(id="j1", pdf_name="x.pdf", status="queued", error=None,
+                                  created_at=1.0, started_at=None, finished_at=None))
+    assert db.get_job("j1") == {"job_id": "j1", "pdf_name": "x.pdf", "status": "queued",
+                                "error": None, "created_at": 1.0, "started_at": None,
+                                "finished_at": None}
+    assert db.get_job("missing") is None
+
+
+def test_fail_orphans_closes_open_jobs_and_leaves_finished_ones(tmp_path):
+    from types import SimpleNamespace
+
+    db = Database(tmp_path / "a2t.db")
+    db.init()
+    for job_id, status in [("q", "queued"), ("r", "running"), ("d", "done"), ("f", "failed")]:
+        db.insert_job(SimpleNamespace(id=job_id, pdf_name="x.pdf", status=status,
+                                      error="original" if status == "failed" else None,
+                                      created_at=1.0, started_at=None, finished_at=None))
+    assert db.fail_orphans("cut off", 99.0) == 2
+    states = {j["job_id"]: (j["status"], j["error"], j["finished_at"]) for j in db.list_jobs()}
+    assert states["q"] == ("failed", "cut off", 99.0)
+    assert states["r"] == ("failed", "cut off", 99.0)
+    assert states["d"] == ("done", None, None)
+    assert states["f"] == ("failed", "original", None)

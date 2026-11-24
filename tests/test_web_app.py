@@ -899,3 +899,106 @@ def test_neither_a_file_nor_a_link_is_refused(client):
     rv = client.post("/jobs", data={"url": "   "})
     assert rv.status_code == 400
     assert b"choose a PDF file or enter a EUR-Lex link" in rv.data
+
+
+# ----------------------------------- earlier jobs: from the admin log, and after a restart
+
+
+def finish_with_files(client, job_id: str) -> None:
+    """A done job with a Word document and a report on disk, as the pipeline leaves it."""
+    registry = client.application.extensions["a2t_jobs"]
+    outdir = registry.job_dir(job_id)
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "report.md").write_text(REPORT_WITH_DOCX)
+    (outdir / "02003L0087-20240301_tracked.docx").write_bytes(b"PK-docx")
+    registry.transition(job_id, status=DONE)
+
+
+def test_the_admin_log_links_each_job_and_its_files(client):
+    job_id = upload(client)
+    finish_with_files(client, job_id)
+
+    page = client.get("/admin").get_data(as_text=True)
+    assert f'href="/jobs/{job_id}"' in page
+    assert f"/api/jobs/{job_id}/artifacts/02003L0087-20240301_tracked.docx" in page
+    assert "Directive 2003/87/EC" in page          # the document's title, from the report
+    assert f"/api/jobs/{job_id}/artifacts/report.md" in page
+
+
+def test_the_status_page_of_a_finished_job_has_its_links_in_the_html(client):
+    """Not only after the script has run."""
+    job_id = upload(client)
+    finish_with_files(client, job_id)
+
+    page = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+    assert f"/api/jobs/{job_id}/artifacts/02003L0087-20240301_tracked.docx" in page
+    assert 'id="cancel-form"' not in page          # nothing to cancel any more
+
+
+def test_a_job_in_progress_still_offers_cancel_and_no_files(client):
+    job_id = upload(client)
+    page = client.get(f"/jobs/{job_id}").get_data(as_text=True)
+    assert 'id="cancel-form"' in page
+    assert "/artifacts/" not in page
+
+
+def test_a_finished_job_is_still_there_after_a_restart(make_app, client):
+    job_id = upload(client)
+    finish_with_files(client, job_id)
+
+    restarted = make_app().test_client()            # same data directory, empty registry
+    assert restarted.application.extensions["a2t_jobs"].get(job_id) is None
+
+    assert restarted.get(f"/jobs/{job_id}").status_code == 200
+    snapshot = restarted.get(f"/api/jobs/{job_id}").get_json()
+    assert snapshot["status"] == DONE
+    assert snapshot["pdf_name"] == "com.pdf"
+    assert [a["name"] for a in snapshot["artifacts"]] == [
+        "02003L0087-20240301_tracked.docx", "report.md"]
+    assert snapshot["artifacts"][0]["title"] == "Directive 2003/87/EC"
+
+    download = restarted.get(snapshot["artifacts"][0]["download_url"])
+    assert download.status_code == 200 and download.data == b"PK-docx"
+    assert restarted.get(f"/api/jobs/{job_id}/report").status_code == 200
+    assert restarted.get(f"/api/jobs/{job_id}/log").status_code == 200
+
+
+def test_a_job_cut_off_by_a_restart_is_failed_with_the_reason(make_app, client):
+    job_id = upload(client)                          # queued, never run
+
+    restarted = make_app().test_client()
+    snapshot = restarted.get(f"/api/jobs/{job_id}").get_json()
+    assert snapshot["status"] == FAILED
+    assert "restarted while this job was running" in snapshot["error"]
+    assert snapshot["artifacts"] == []
+    entry = restarted.application.extensions["a2t_db"].get_job(job_id)
+    assert entry["status"] == FAILED and entry["finished_at"] is not None
+
+
+def test_an_unknown_or_unsafe_job_id_is_a_404_not_a_path(client):
+    for bad in ["nope", "..", "%2e%2e%2fa2t.db", "x" * 200]:
+        assert client.get(f"/api/jobs/{bad}").status_code == 404
+        assert client.get(f"/jobs/{bad}").status_code == 404
+
+
+def test_a_download_name_cannot_leave_the_job_directory_after_a_restart(make_app, client, tmp_path):
+    job_id = upload(client)
+    finish_with_files(client, job_id)
+    (tmp_path / "secret.txt").write_text("not for download")
+
+    restarted = make_app().test_client()
+    for name in ["..%2f..%2fsecret.txt", "..%2fsecret.txt", "../secret.txt"]:
+        assert restarted.get(f"/api/jobs/{job_id}/artifacts/{name}").status_code == 404
+
+
+def test_a_job_whose_files_were_removed_gives_a_page_not_an_error(make_app, client):
+    import shutil
+
+    job_id = upload(client)
+    finish_with_files(client, job_id)
+    shutil.rmtree(client.application.extensions["a2t_jobs"].job_dir(job_id))
+
+    restarted = make_app().test_client()
+    assert restarted.get(f"/jobs/{job_id}").status_code == 200
+    assert restarted.get(f"/api/jobs/{job_id}").get_json()["artifacts"] == []
+    assert "files removed" in restarted.get("/admin").get_data(as_text=True)
