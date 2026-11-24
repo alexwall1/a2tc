@@ -129,6 +129,15 @@ class Worker:
                 self.registry.set_proc(job_id, None)
             if self.registry.was_cancelled(job_id):
                 self.registry.finalize(job_id, status=CANCELLED)
+            elif returncode in (0, EXIT_PARTIAL) and not list(job.outdir.glob("*.docx")):
+                # Exit status 0 with no Word document is what an older `convert` gave when
+                # every act failed to retrieve. A job that produced nothing to download is
+                # not done: it said so on the status page, with no link and no reason.
+                self.registry.finalize(
+                    job_id, status=FAILED,
+                    error="The run finished but produced no Word document — no amended "
+                          "act could be retrieved or converted. " + _failure_error(
+                              log_path, returncode))
             elif returncode == 0:
                 self.registry.finalize(job_id, status=DONE)
             elif returncode == EXIT_PARTIAL:

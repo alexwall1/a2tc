@@ -23,6 +23,17 @@ WRITE_REPORT_SCRIPT = (
     "out = pathlib.Path(sys.argv[1]);"
     "out.mkdir(parents=True, exist_ok=True);"
     "(out / 'report.md').write_text('# report');"
+    "(out / '02003L0087-20240301_tracked.docx').write_bytes(b'PK');"
+)
+
+# Exits 0 having written a report but no Word document: what an older `convert` did when
+# every act failed to retrieve.
+NO_DOCUMENT_SCRIPT = (
+    "import pathlib, sys;"
+    "out = pathlib.Path(sys.argv[1]);"
+    "out.mkdir(parents=True, exist_ok=True);"
+    "(out / 'report.md').write_text('# report');"
+    "print('Directive 2003/87/EC: SKIPPED — retrieval failed');"
 )
 
 FAIL_SCRIPT = (
@@ -744,6 +755,7 @@ PARTIAL_SCRIPT = (
     "out = pathlib.Path(sys.argv[1]);"
     "out.mkdir(parents=True, exist_ok=True);"
     "(out / 'report.md').write_text('# report');"
+    "(out / '01992L0106-20130701_tracked.docx').write_bytes(b'PK');"
     "print('NOT CONVERTED  Regulation (EU) 2020/1056: could not list versions');"
     "sys.exit(3)"
 )
@@ -771,3 +783,21 @@ def test_the_exit_status_for_a_partial_conversion_is_not_clicks_usage_error():
     from a2t.cli import EXIT_PARTIAL
 
     assert EXIT_PARTIAL == 3
+
+
+def test_a_run_that_exits_cleanly_with_no_word_document_is_failed(tmp_path, monkeypatch, settings):
+    """A job with nothing to download is not "done" — and it says why."""
+    monkeypatch.setattr(worker_module.pipeline, "build_command",
+                        fake_build(NO_DOCUMENT_SCRIPT))
+    registry = JobRegistry()
+    worker = make_worker(registry, settings)
+    try:
+        job = make_job(registry, tmp_path)
+        worker.submit(job)
+        wait_until(lambda: registry.get(job.id).status == FAILED)
+
+        error = registry.get(job.id).error
+        assert "produced no Word document" in error
+        assert "SKIPPED — retrieval failed" in error   # the log's own words are kept
+    finally:
+        worker.shutdown()
