@@ -15,3 +15,4 @@ out*
 *.docx
 Dockerfile
 .dockerignore
+api-key.txt

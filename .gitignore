@@ -1,4 +1,7 @@
-# Legacy key file — the LLM tier now reads `.secrets/openrouter-key` (ignored below)
+# The LLM provider's key — never commit it
+api-key.txt
+
+# Key files of the tool's earlier provider
 .openrouter_key
 
 # Sample legislation. Proposals and consolidated acts are public documents on

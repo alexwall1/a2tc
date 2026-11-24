@@ -140,8 +140,8 @@ def _walk(root: Node, path: Path) -> Node | None:
     return node
 
 
-class OpenRouterClient:
-    """Minimal OpenRouter chat client with on-disk response caching."""
+class LlmClient:
+    """Minimal chat client for an OpenAI-compatible router, with response caching on disk."""
 
     def __init__(self, settings: Settings | None = None,
                  cache_dir: FsPath | str | None = None):
@@ -155,33 +155,20 @@ class OpenRouterClient:
 
     def complete(self, messages: list[dict], schema: dict) -> tuple[dict, bool]:
         """Return `(parsed_json, from_cache)`."""
+        model = self.settings.require_model()
+        # The endpoint is part of the key: the same model id on another router is
+        # another model, and an answer cached from one must not be served as the other's.
         digest = hashlib.sha256(
-            json.dumps([self.settings.model, messages], sort_keys=True).encode()
+            json.dumps([self.settings.base_url, model, messages],
+                       sort_keys=True).encode()
         ).hexdigest()[:32]
 
         path = self._cache_path(digest)
         if path and path.is_file():
             return json.loads(path.read_text(encoding="utf-8")), True
 
-        body = {
-            "model": self.settings.model,
-            "messages": messages,
-            "temperature": 0,
-            "response_format": schema,
-        }
         try:
-            response = requests.post(
-                f"{self.settings.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.settings.require_key()}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=self.settings.timeout,
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
+            parsed = self._ask(model, messages, schema)
         except Exception as exc:
             raise LlmError(str(exc)) from exc
 
@@ -189,11 +176,59 @@ class OpenRouterClient:
             path.write_text(json.dumps(parsed), encoding="utf-8")
         return parsed, False
 
+    def _ask(self, model: str, messages: list[dict], schema: dict) -> dict:
+        response = self._post(model, messages, schema)
+        if response.status_code in (400, 422) and schema.get("type") == "json_schema":
+            # Many models — the free ones especially — cannot honour a strict JSON
+            # schema. Ask once more for a JSON object, with the schema in the prompt.
+            # The reply is checked against the schema by the caller either way, so
+            # nothing is accepted that a strict answer would not have been.
+            response = self._post(model, self._with_schema(messages, schema),
+                                  {"type": "json_object"})
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        return json.loads(_json_text(content))
+
+    def _post(self, model: str, messages: list[dict], response_format: dict):
+        return requests.post(
+            f"{self.settings.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.settings.require_key()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": 0,
+                "response_format": response_format,
+            },
+            timeout=self.settings.timeout,
+        )
+
+    @staticmethod
+    def _with_schema(messages: list[dict], schema: dict) -> list[dict]:
+        wanted = schema.get("json_schema", {}).get("schema", {})
+        instruction = (
+            "Reply with a single JSON object that conforms to this JSON Schema, and "
+            "nothing else — no prose, no code fence:\n" + json.dumps(wanted)
+        )
+        return [*messages, {"role": "system", "content": instruction}]
+
+
+def _json_text(content: str) -> str:
+    """The JSON in a reply, allowing for a model that wraps it in a code fence."""
+    text = (content or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text[:4].lower() == "json":
+            text = text[4:]
+    return text.strip()
+
 
 class LlmResolver:
     """Resolves an instruction by choosing among real provisions of the act."""
 
-    def __init__(self, client: OpenRouterClient, min_confidence: float = 0.5):
+    def __init__(self, client: LlmClient, min_confidence: float = 0.5):
         self.client = client
         self.min_confidence = min_confidence
         self.stats = LlmStats()

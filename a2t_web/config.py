@@ -3,8 +3,7 @@
 Users are seeded into the SQLite database on first run from the
 ``A2T_ADMIN_*`` / ``A2T_USER_*`` environment variables. The legacy
 ``.secrets/user-password`` / ``.secrets/admin-password`` files are no longer
-read; the OpenRouter key handling in ``a2t.config`` (``.secrets/openrouter-key``)
-is unrelated and unchanged.
+read; the LLM key handling in ``a2t.config`` (``api-key.txt``) is unrelated.
 """
 
 from __future__ import annotations

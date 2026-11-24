@@ -74,10 +74,14 @@ open until the tracked-changes documents and `report.md` are ready to download.
   amendment. Fetched PDFs are kept in `<data dir>/fetched/`.
 - Uploads, results, and the SQLite database (`a2t.db`) live in `./webapp-data`
   by default; `A2T_WEB_DATA_DIR` overrides the location.
-- The web app runs the pipeline with the LLM tier (`--llm`) enabled, so an
-  OpenRouter key must be available to the worker process: set
-  `OPENROUTER_API_KEY` in the environment that starts `a2t-web`, or place
-  `.secrets/openrouter-key` in the directory where you start it.
+- The web app runs the pipeline with the LLM tier (`--llm`) enabled, so a
+  [Requesty](https://www.requesty.ai) key and a model id must be available to the worker
+  process: put the key in a file named `api-key.txt` in the project root of the
+  deployed app (or set `REQUESTY_API_KEY`), and set `A2T_MODEL` to a Requesty model id.
+  A job started without them fails at once and says which is missing. The key file is
+  never baked into the Docker image (`.dockerignore`) or committed (`.gitignore`): supply
+  it at run time, as a mounted secret file (`/etc/secrets/api-key.txt` is looked in too)
+  or in the app directory.
 - Bind to `127.0.0.1` only. Exposing it on the LAN (`A2T_WEB_HOST=0.0.0.0`)
   exposes upload and download endpoints — don't. With users configured the
   app is no longer unauthenticated on the LAN, but localhost-only binding is
@@ -122,8 +126,8 @@ A2T_USER_PASSWORD='...' A2T_USER_USERNAME='alice' .venv/bin/a2t-web
   restarts.
 - The old `.secrets/user-password` / `.secrets/admin-password` files are
   **deprecated and no longer read**; migrate to the seed environment
-  variables above or to the CLI below. The `.secrets/openrouter-key` file is
-  still read by the pipeline (see above) and is unrelated to access control.
+  variables above or to the CLI below. The `api-key.txt` file holds the LLM provider's key (see above) and
+  is unrelated to access control.
 
 To add a user or reset a password on an existing deployment, use the
 `a2t-web-users` CLI (the database file must already exist — start the app
@@ -148,15 +152,19 @@ Render free tier — history will not survive a re-deploy there. Point
 | `-o, --out PATH` | Output directory (default `out`). |
 | `--as-of YYYY-MM-DD` | Override the proposal date used to pick the consolidated version. Useful when the cover date is unreadable, or to select a version the drafters were more likely to have read. |
 | `--llm / --no-llm` | Offer instructions the rules could not resolve to an LLM tier. Off by default. |
-| `--model TEXT` | OpenRouter model id (default `openai/gpt-5-nano`). |
+| `--model TEXT` | Requesty model id; `A2T_MODEL` sets it for every run. There is no built-in default. |
 | `--cache PATH` | Where retrieved acts are cached (default `~/.cache/a2t/acts`). |
 | `--author TEXT` | Author name recorded on every tracked change (default `A2T`). |
 | `--recitals` | Insert the proposal's own preamble ahead of the articles, as tracked insertions. Off by default — see below. |
 
-The LLM tier is optional and needs an OpenRouter key, from `$OPENROUTER_API_KEY` or
-a `.secrets/openrouter-key` file in the project root (a legacy `.openrouter_key`
-file is still recognized). Without `--llm` the app is entirely
-offline apart from EUR-Lex retrieval.
+The LLM tier is optional and needs a [Requesty](https://www.requesty.ai) key and a
+model id. The key comes from `$REQUESTY_API_KEY` or a file named `api-key.txt` (looked
+for from the proposal's directory and the working directory upwards, then in the project
+root, then in `/etc/secrets/`); the model from `--model` or `$A2T_MODEL`. The endpoint is
+`https://router.requesty.ai/v1`. A key issued by another provider is never read or sent.
+Models that cannot honour a strict JSON schema are asked for a JSON object instead, and
+every reply is validated either way. Without `--llm` the app is entirely offline apart
+from EUR-Lex retrieval.
 
 ## Recitals
 

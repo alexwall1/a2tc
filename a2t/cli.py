@@ -298,7 +298,7 @@ def retrieve(pdf: Path, cache: Path, refresh: bool, as_of) -> None:
 @click.option("--verbose", is_flag=True, help="List every resolved instruction.")
 @click.option("--llm/--no-llm", default=False,
               help="Offer unresolved instructions to the LLM tier.")
-@click.option("--model", default=None, help="OpenRouter model id.")
+@click.option("--model", default=None, help="Requesty model id (or set A2T_MODEL).")
 @click.option("--llm-cache", type=click.Path(path_type=Path),
               default=Path("out/llmcache"), show_default=True)
 def resolve(pdf: Path, cache: Path, as_of, verbose: bool, llm: bool,
@@ -308,7 +308,7 @@ def resolve(pdf: Path, cache: Path, as_of, verbose: bool, llm: bool,
     from a2t.parse.rules import classify_all
     from a2t.parse.segment import segment
     from a2t.resolve.fallback import apply_llm_fallback
-    from a2t.resolve.llm import LlmResolver, OpenRouterClient
+    from a2t.resolve.llm import LlmResolver, LlmClient
     from a2t.resolve.resolver import resolve_block
 
     llm_resolver = None
@@ -316,9 +316,10 @@ def resolve(pdf: Path, cache: Path, as_of, verbose: bool, llm: bool,
         settings = load_settings(pdf.resolve().parent, model=model)
         try:
             settings.require_key()
+            settings.require_model()
         except ConfigError as exc:
             raise click.ClickException(str(exc)) from exc
-        llm_resolver = LlmResolver(OpenRouterClient(settings, cache_dir=llm_cache))
+        llm_resolver = LlmResolver(LlmClient(settings, cache_dir=llm_cache))
         click.echo(f"LLM tier: {settings.model}\n")
 
     try:
@@ -393,7 +394,7 @@ def resolve(pdf: Path, cache: Path, as_of, verbose: bool, llm: bool,
 @click.option("--as-of", type=click.DateTime(["%Y-%m-%d"]), default=None)
 @click.option("--llm/--no-llm", default=False,
               help="Offer unresolved instructions to the LLM tier.")
-@click.option("--model", default=None, help="OpenRouter model id.")
+@click.option("--model", default=None, help="Requesty model id (or set A2T_MODEL).")
 @click.option("--llm-cache", type=click.Path(path_type=Path),
               default=Path("out/llmcache"), show_default=True)
 @click.option("--author", default="A2T", show_default=True,
@@ -413,7 +414,7 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
     from a2t.parse.rules import classify_all
     from a2t.parse.segment import own_provisions, segment
     from a2t.resolve.fallback import apply_llm_fallback
-    from a2t.resolve.llm import LlmResolver, OpenRouterClient
+    from a2t.resolve.llm import LlmResolver, LlmClient
     from a2t.resolve.resolver import resolve_block
 
     llm_resolver = None
@@ -421,9 +422,10 @@ def convert(pdf: Path, outdir: Path, cache: Path, as_of, llm: bool,
         settings = load_settings(pdf.resolve().parent, model=model)
         try:
             settings.require_key()
+            settings.require_model()
         except ConfigError as exc:
             raise click.ClickException(str(exc)) from exc
-        llm_resolver = LlmResolver(OpenRouterClient(settings, cache_dir=llm_cache))
+        llm_resolver = LlmResolver(LlmClient(settings, cache_dir=llm_cache))
 
     try:
         lines = extract_lines(pdf)
@@ -619,7 +621,7 @@ def _elide(text: str, keep: int = 40) -> str:
               show_default=True)
 @click.option("--llm-cache", type=click.Path(path_type=Path),
               default=Path("out/llmcache"), show_default=True)
-@click.option("--model", default=None, help="OpenRouter model id.")
+@click.option("--model", default=None, help="Requesty model id (or set A2T_MODEL).")
 @click.option("--limit", type=int, default=25, show_default=True,
               help="How many instructions to evaluate.")
 @click.option("--as-of", type=click.DateTime(["%Y-%m-%d"]), default=None)
@@ -630,12 +632,13 @@ def llm_eval(pdf: Path, cache: Path, llm_cache: Path, model: str | None,
     from a2t.parse.rules import classify_all
     from a2t.parse.segment import segment
     from a2t.resolve.evaluate import evaluate
-    from a2t.resolve.llm import LlmResolver, OpenRouterClient
+    from a2t.resolve.llm import LlmResolver, LlmClient
     from a2t.resolve.resolver import resolve_block
 
     settings = load_settings(pdf.resolve().parent, model=model)
     try:
         settings.require_key()
+        settings.require_model()
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -646,7 +649,7 @@ def llm_eval(pdf: Path, cache: Path, llm_cache: Path, model: str | None,
     provider = EurlexBuilderProvider(cache_dir=cache)
     by_celex = {t.celex: t for t in detection.targets}
 
-    client = OpenRouterClient(settings, cache_dir=llm_cache)
+    client = LlmClient(settings, cache_dir=llm_cache)
     resolver = LlmResolver(client)
     click.echo(f"model: {settings.model}\n")
 
@@ -758,7 +761,7 @@ def corpus_fetch(celex: tuple[str, ...], cache: Path, delay: float) -> None:
               default=Path("out/corpus/report.txt"), show_default=True)
 @click.option("--classifier", type=click.Choice(["rules", "llm"]), default="rules",
               show_default=True, help="How instructions are interpreted.")
-@click.option("--model", default=None, help="OpenRouter model id.")
+@click.option("--model", default=None, help="Requesty model id (or set A2T_MODEL).")
 @click.option("--llm-cache", type=click.Path(path_type=Path),
               default=Path("out/llmcache"), show_default=True)
 @click.option("--no-fallback", is_flag=True,
@@ -776,15 +779,16 @@ def corpus_run(pdfs: tuple[Path, ...], triples: Path | None, pdf_dir: Path,
     if classifier == "llm":
         from a2t.config import ConfigError, load_settings
         from a2t.parse.llm_classify import LlmClassifier
-        from a2t.resolve.llm import OpenRouterClient
+        from a2t.resolve.llm import LlmClient
 
         settings = load_settings(Path.cwd(), model=model)
         try:
             settings.require_key()
+            settings.require_model()
         except ConfigError as exc:
             raise click.ClickException(str(exc)) from exc
         interpreter = LlmClassifier(
-            OpenRouterClient(settings, cache_dir=llm_cache),
+            LlmClient(settings, cache_dir=llm_cache),
             fall_back=not no_fallback,
         )
         click.echo(f"classifier: LLM ({settings.model}), "
@@ -793,14 +797,15 @@ def corpus_run(pdfs: tuple[Path, ...], triples: Path | None, pdf_dir: Path,
     resolver_tier = None
     if llm_resolve:
         from a2t.config import ConfigError, load_settings
-        from a2t.resolve.llm import LlmResolver, OpenRouterClient
+        from a2t.resolve.llm import LlmResolver, LlmClient
 
         settings = load_settings(Path.cwd(), model=model)
         try:
             settings.require_key()
+            settings.require_model()
         except ConfigError as exc:
             raise click.ClickException(str(exc)) from exc
-        resolver_tier = LlmResolver(OpenRouterClient(settings, cache_dir=llm_cache))
+        resolver_tier = LlmResolver(LlmClient(settings, cache_dir=llm_cache))
         click.echo(f"resolution tier: LLM ({settings.model})\n")
 
     provider = EurlexBuilderProvider(cache_dir=cache)

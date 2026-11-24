@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 from a2t.model.instruction import Instruction, Op
 from a2t.parse.normalise import normalise
-from a2t.resolve.llm import OpenRouterClient
+from a2t.resolve.llm import LlmClient
 
 OPERATIONS = {
     "container": Op.CONTAINER,
@@ -115,7 +115,7 @@ def _verbatim(value: str, source: str) -> str | None:
 class LlmClassifier:
     """Drop-in replacement for `rules.classify`, with the grammar as a fallback."""
 
-    def __init__(self, client: OpenRouterClient, fall_back: bool = True):
+    def __init__(self, client: LlmClient, fall_back: bool = True):
         self.client = client
         self.fall_back = fall_back
         self.stats = ClassifierStats()
