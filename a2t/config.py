@@ -29,7 +29,7 @@ BASE_URL = "https://router.requesty.ai/v1"
 # The id is the one given by the user for Requesty. It has not been tried against the
 # router from here. Override it with `A2T_MODEL` or `--model`; if Requesty rejects it,
 # copy the full id (router ids often carry a provider prefix) from its model list.
-DEFAULT_MODEL: str | None = "gemma-4-31b-it"
+DEFAULT_MODEL: str | None = "novita/ling-3.1-flash"
 
 
 class ConfigError(RuntimeError):

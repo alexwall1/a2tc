@@ -594,9 +594,9 @@ def test_an_llm_run_with_a_key_but_no_model_says_so(isolated, monkeypatch, comma
     assert "A2T_MODEL" in result.output
 
 
-def test_the_default_model_is_gemma_and_can_be_overridden(monkeypatch, tmp_path):
+def test_the_default_model_is_the_configured_one_and_can_be_overridden(monkeypatch, tmp_path):
     monkeypatch.delenv("A2T_MODEL", raising=False)
-    assert load_settings(tmp_path).model == "gemma-4-31b-it"
+    assert load_settings(tmp_path).model == "novita/ling-3.1-flash"
     assert load_settings(tmp_path, model="vendor/other").model == "vendor/other"
     monkeypatch.setenv("A2T_MODEL", "from/env")
     assert load_settings(tmp_path).model == "from/env"
