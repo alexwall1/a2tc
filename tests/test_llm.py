@@ -584,6 +584,7 @@ def test_an_llm_run_with_a_key_but_no_model_says_so(isolated, monkeypatch, comma
 
     monkeypatch.setenv(KEY_ENV, "rq-key")
     monkeypatch.delenv("A2T_MODEL", raising=False)
+    monkeypatch.setattr("a2t.config.DEFAULT_MODEL", None)  # as if no default were built in
     pdf = isolated / "proposal.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     result = CliRunner().invoke(main, [command, str(pdf), "--llm"])
@@ -591,3 +592,12 @@ def test_an_llm_run_with_a_key_but_no_model_says_so(isolated, monkeypatch, comma
     assert result.exit_code != 0
     assert "no model set" in result.output
     assert "A2T_MODEL" in result.output
+
+
+def test_the_default_model_is_gemma_and_can_be_overridden(monkeypatch, tmp_path):
+    monkeypatch.delenv("A2T_MODEL", raising=False)
+    assert load_settings(tmp_path).model == "gemma-4-31b-it"
+    assert load_settings(tmp_path, model="vendor/other").model == "vendor/other"
+    monkeypatch.setenv("A2T_MODEL", "from/env")
+    assert load_settings(tmp_path).model == "from/env"
+    assert load_settings(tmp_path, model="vendor/other").model == "vendor/other"

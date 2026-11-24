@@ -22,13 +22,14 @@ SECRET_MOUNT = Path("/etc/secrets")
 BASE_URL = "https://router.requesty.ai/v1"
 
 # The tier performs closed-set selection over candidates supplied in the prompt, not
-# open-ended generation, so a small model is enough. It has to answer in JSON; models
+# open-ended generation, so a mid-sized model is enough. It has to answer in JSON; models
 # that cannot honour a strict JSON schema are asked for a JSON object instead (see
 # `a2t.resolve.llm.LlmClient`), and every reply is validated either way.
 #
-# There is deliberately no default: a model id that does not exist on the router would
-# fail every job at runtime. Set `A2T_MODEL`, or pass `--model`, to a Requesty model id.
-DEFAULT_MODEL: str | None = None
+# The id is the one given by the user for Requesty. It has not been tried against the
+# router from here. Override it with `A2T_MODEL` or `--model`; if Requesty rejects it,
+# copy the full id (router ids often carry a provider prefix) from its model list.
+DEFAULT_MODEL: str | None = "gemma-4-31b-it"
 
 
 class ConfigError(RuntimeError):

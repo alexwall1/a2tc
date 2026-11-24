@@ -77,8 +77,9 @@ open until the tracked-changes documents and `report.md` are ready to download.
 - The web app runs the pipeline with the LLM tier (`--llm`) enabled, so a
   [Requesty](https://www.requesty.ai) key and a model id must be available to the worker
   process: put the key in a file named `api-key.txt` in the project root of the
-  deployed app (or set `REQUESTY_API_KEY`), and set `A2T_MODEL` to a Requesty model id.
-  A job started without them fails at once and says which is missing. The key file is
+  deployed app (or set `REQUESTY_API_KEY`). The model is `gemma-4-31b-it` unless
+  `A2T_MODEL` names another Requesty model id. A job started without a key fails at once
+  and says so. The key file is
   never baked into the Docker image (`.dockerignore`) or committed (`.gitignore`): supply
   it at run time, as a mounted secret file (`/etc/secrets/api-key.txt` is looked in too)
   or in the app directory.
@@ -152,7 +153,7 @@ Render free tier — history will not survive a re-deploy there. Point
 | `-o, --out PATH` | Output directory (default `out`). |
 | `--as-of YYYY-MM-DD` | Override the proposal date used to pick the consolidated version. Useful when the cover date is unreadable, or to select a version the drafters were more likely to have read. |
 | `--llm / --no-llm` | Offer instructions the rules could not resolve to an LLM tier. Off by default. |
-| `--model TEXT` | Requesty model id; `A2T_MODEL` sets it for every run. There is no built-in default. |
+| `--model TEXT` | Requesty model id (default `gemma-4-31b-it`); `A2T_MODEL` sets it for every run. |
 | `--cache PATH` | Where retrieved acts are cached (default `~/.cache/a2t/acts`). |
 | `--author TEXT` | Author name recorded on every tracked change (default `A2T`). |
 | `--recitals` | Insert the proposal's own preamble ahead of the articles, as tracked insertions. Off by default — see below. |
@@ -160,7 +161,7 @@ Render free tier — history will not survive a re-deploy there. Point
 The LLM tier is optional and needs a [Requesty](https://www.requesty.ai) key and a
 model id. The key comes from `$REQUESTY_API_KEY` or a file named `api-key.txt` (looked
 for from the proposal's directory and the working directory upwards, then in the project
-root, then in `/etc/secrets/`); the model from `--model` or `$A2T_MODEL`. The endpoint is
+root, then in `/etc/secrets/`); the model from `--model` or `$A2T_MODEL` (default `gemma-4-31b-it`). The endpoint is
 `https://router.requesty.ai/v1`. A key issued by another provider is never read or sent.
 Models that cannot honour a strict JSON schema are asked for a JSON object instead, and
 every reply is validated either way. Without `--llm` the app is entirely offline apart
